@@ -1,0 +1,7 @@
+# .cmd / .bat 必须 CRLF：cmd.exe 对 LF-only 的容错有限（标签、goto、多行块都可能出问题），
+# 而 tools/install_git.cmd 是**新机上"一定跑得动"的那条入口**，不能靠 core.autocrlf 这个机器设置
+# （autocrlf=false 的机器 clone 出来就是 LF）。
+# `text eol=crlf` = 仓库里存 LF、**检出时写成 CRLF**，与 autocrlf 怎么设无关。
+# 守卫：tests/unit/test_sync_handbook.py::test_install_git_wrapper_is_policy_proof 会检查工作区是 CRLF。
+*.cmd text eol=crlf
+*.bat text eol=crlf
