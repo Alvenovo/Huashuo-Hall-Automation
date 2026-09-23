@@ -353,6 +353,116 @@ def test_both_docs_clone_into_the_expected_directory(doc_texts):
             )
 
 
+# 2026-09-23 **第一台真新机实测**踩出来的坑，性质和上面两条一样（文档承诺 ≠ 真机能跑），
+# 但更狠 —— 那条命令**一条都没执行**就被拦：
+#
+#     PS C:\Users\ASUS> & "\\LAPTOP-VS5F7HF4\hall-packages\repo\install_git.ps1"
+#     无法加载文件 \\...\install_git.ps1，因为在此系统上禁止运行脚本。
+#     + CategoryInfo : SecurityError: (:) []，PSSecurityException
+#     + FullyQualifiedErrorId : UnauthorizedAccess
+#
+# 两层原因，任一层都足以拦下：
+#   ① 全新 **Windows 客户端**的执行策略默认是 **Restricted**（Windows Server 才是 RemoteSigned）——
+#      「因为在此系统上禁止运行脚本」就是它的原话；
+#   ② 就算策略是 `RemoteSigned`，**UNC 路径仍被当作"远端"**，未签名的 .ps1 一样被拒。
+# **所以"本机 `& .\脚本.ps1` 跑得通"推不出"新机上跑得通"**：本机是本地路径、策略也未必是默认值。
+#
+# 规则：代码块里凡是**调用** .ps1 的行，必须带 `-ExecutionPolicy Bypass`；
+# 新机第一条命令改走 `.cmd` 入口（.cmd 不是"脚本文件"，执行策略管不着它）。
+# 本机已用 `-ExecutionPolicy Restricted` 复现并验证（见《多机代码分发.md》）。
+_PS1_SUFFIX = ".ps1"
+_POLICY_FLAG = "-ExecutionPolicy"
+# 除两份发放文档外，**权威说明**那份也要一起管 —— 三处都写过那条错命令。
+_POLICY_DOCS = (REPO_ROOT / "项目知识库" / "多机代码分发.md",)
+_INSTALL_CMD = "install_git.cmd"
+
+
+def _ps1_calls(blocks: str) -> list[str]:
+    """从代码块里挑出**真的在调脚本**的行（不是"提到脚本名"的行）。
+
+    判据：行首是 `&`（调用运算符），或以 `powershell` / `pwsh` 开头。
+    像 `install_git.ps1    8710 字节，UTF-8 with BOM` 这种列举、
+    `dir \\...\\repo   # 能看到 ... install_git.ps1` 这种正文，都**不算**调用 —— 不能误伤。
+    """
+    calls: list[str] = []
+    for line in blocks.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or _PS1_SUFFIX not in s:
+            continue
+        if s.startswith("&") or s.lower().startswith(("powershell", "pwsh")):
+            calls.append(s)
+    return calls
+
+
+def test_doc_ps1_calls_carry_execution_policy(doc_texts):
+    """**核心**：代码块里调用 `.ps1` 的行必须带 `-ExecutionPolicy Bypass`。
+
+    没带的话，全新机器上这条命令**一条都不执行**就报
+    「无法加载文件 … 因为在此系统上禁止运行脚本」，而报错看着像"脚本坏了 / 共享盘坏了"——
+    一线会去查网络、查共享盘 ACL，**全错**。2026-09-23 第一台真新机卡的就是这一步。
+    """
+    targets = dict(doc_texts)
+    for doc in _POLICY_DOCS:
+        assert doc.is_file(), f"守卫前提没了：{doc} 不存在"
+        targets[doc.name] = doc.read_text(encoding="utf-8")
+
+    for name, text in targets.items():
+        bad = [ln for ln in _ps1_calls(_fenced_blocks(text)) if _POLICY_FLAG not in ln]
+        assert not bad, (
+            f"{name} 里这些命令调用 .ps1 却没带 `{_POLICY_FLAG} Bypass`：\n  "
+            + "\n  ".join(bad)
+            + "\n全新 Windows 客户端的执行策略默认是 `Restricted`，UNC 路径在 `RemoteSigned` 下"
+            "也算「远端」—— 任一条都足以让命令**一条都不执行**就报"
+            "「无法加载文件 … 因为在此系统上禁止运行脚本」。"
+            "改走 `.cmd` 入口，或补上 `-ExecutionPolicy Bypass`"
+        )
+
+
+def test_both_docs_use_the_policy_proof_cmd_entry(doc_texts):
+    """两份发放文档的代码块里都要有 `.cmd` 入口 —— 新机上唯一"一定跑得动"的那条。
+
+    只把 `.ps1` 那条加上 `-ExecutionPolicy Bypass` 也算对（上一条用例管着），
+    但 `.cmd` 是**不用记参数**的那条，新机第一步不该让人先学一个开关。
+    """
+    for name, text in doc_texts.items():
+        assert _INSTALL_CMD in _fenced_blocks(text), (
+            f"{name} 的代码块里没有 `{_INSTALL_CMD}` —— "
+            "新机第一步就只能敲带 `-ExecutionPolicy Bypass` 的长命令，"
+            "而那条命令**本来可以不存在**（见《多机代码分发.md》2026-09-23 那节）"
+        )
+
+
+def test_install_git_wrapper_is_policy_proof():
+    """`.cmd` 外壳本身：存在、纯 ASCII + CRLF + 无 BOM、正文带 Bypass。
+
+    编码这条**不是洁癖**：cmd.exe 按 OEM 代码页读 .cmd，中文会乱码；
+    而 BOM 会让第一行变成 `@echo off`（BOM 被当成命令的一部分）。
+    与 `install_git.ps1` 的规则**正好相反**（那边必须 UTF-8 **with** BOM）——
+    两边都容易顺手写反，所以钉住。
+    """
+    path = REPO_ROOT / "tools" / _INSTALL_CMD
+    assert path.is_file(), f"缺少 {path} —— 新机上没有这条入口，第一步又会撞执行策略"
+    raw = path.read_bytes()
+    assert all(b < 128 for b in raw), "`.cmd` 里出现了非 ASCII 字符 —— cmd.exe 会读成乱码"
+    assert not raw.startswith(b"\xef\xbb\xbf"), "`.cmd` 不该有 BOM（会被当成 @echo off 的一部分）"
+    assert raw.count(b"\r\n") == raw.count(b"\n"), "`.cmd` 必须全是 CRLF 换行"
+
+    text = raw.decode("ascii")
+    body = [ln for ln in text.splitlines() if ln.strip().lower().startswith("powershell")]
+    assert len(body) == 1, f"`.cmd` 里应当只有一行调用（实得 {len(body)} 行）：{body}"
+    line = body[0]
+    assert "-ExecutionPolicy Bypass" in line and "-File" in line, (
+        f"`.cmd` 拉起 .ps1 的那行没带 `-ExecutionPolicy Bypass -File`：{line}"
+    )
+    assert "%~dp0install_git.ps1" in line, (
+        f"`.cmd` 没用 `%~dp0` 定位同目录的 .ps1 —— 换台机器/换个调用位置就找不到：{line}"
+    )
+    assert text.rstrip().endswith("exit /b %ERRORLEVEL%"), (
+        "`.cmd` 结尾要把 .ps1 的退出码透出去 —— 否则上层拿到的永远是 0，"
+        "rc=2/3/4/5 这些分支全变成假绿"
+    )
+
+
 # 2026-09-22 发新机前复核查出的**顺序错**（《交付前验收.md》第 11 条）：
 # 《新机操作清单》第 3.5 步（关实时保护）让一线跑
 #     .venv\Scripts\python.exe -X utf8 tools\probe_av_quarantine.py

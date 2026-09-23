@@ -9,8 +9,19 @@
 #   不能只做在 bootstrap 里。它就是这个不依赖任何东西的第 0 层入口。
 #   复杂度与手册路线 B（一行 PowerShell 下 zip）相当，但**不需要外网、不需要令牌**。
 #
-# 用法（新测试机，普通 PowerShell 即可；安装程序自己会要管理员）：
-#   & "\\LAPTOP-VS5F7HF4\hall-packages\repo\install_git.ps1"
+# 用法（新测试机，普通 PowerShell / cmd 窗口都行；安装程序自己会要管理员）：
+#   \\LAPTOP-VS5F7HF4\hall-packages\repo\install_git.cmd      ← 首选，理由见下
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "\\LAPTOP-VS5F7HF4\hall-packages\repo\install_git.ps1"
+#
+# ⚠️ **不许写成 `& "\\...\install_git.ps1"`** —— 2026-09-23 第一台真新机就是这么炸的：
+#   全新 Windows 客户端的执行策略默认是 **Restricted**，而且 **UNC 路径在 RemoteSigned 下
+#   也算"远端"** —— 直接 `&` 一个共享盘上的 .ps1 必然报：
+#       无法加载文件 \\...\install_git.ps1，因为在此系统上禁止运行脚本
+#       CategoryInfo: SecurityError, UnauthorizedAccess
+#   看着像"脚本坏了 / 共享盘坏了"，其实只是执行策略，本机怎么折腾都没用。
+#   同目录的 `install_git.cmd` 就是为这条存在的：**.cmd 不是"脚本文件"，执行策略管不着它**，
+#   它再带 `-ExecutionPolicy Bypass` 把本脚本拉起来 —— 换台机器也不会再撞。
+#   （2026-09-23 本机用 `-ExecutionPolicy Restricted` 的外层进程复现并验证过，见《多机代码分发.md》。）
 #
 # 退出码：
 #   0  成功，或本来就装了（跳过）
