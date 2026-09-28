@@ -183,13 +183,17 @@ def _machine_dir_attrs(node: ast.AST) -> list[str]:
 
 
 def _guards_existence(node: ast.AST) -> bool:
-    """函数里有没有「判存在」的动作。"""
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call) and _called_name(sub) == "skip":
-            return True
-        if isinstance(sub, ast.Attribute) and sub.attr in EXISTENCE_CHECKS:
-            return True
-    return False
+    """函数里有没有**真的判过存在性**。
+
+    只认 `is_dir()` / `is_file()` / `exists()` 这类调用 —— **不能拿任意 `pytest.skip`
+    充数**：机器目录用例往往本来就有一个 skip（比如「工具没配」），
+    拿它充数的话，把目录守卫删了这条规则还是绿的。
+    （本规则第一版就是这么写的，注入验证时当场露馅。）
+    """
+    return any(
+        isinstance(sub, ast.Call) and _called_name(sub) in EXISTENCE_CHECKS
+        for sub in ast.walk(node)
+    )
 
 
 def test_every_machine_dir_use_is_guarded_by_an_existence_check():
