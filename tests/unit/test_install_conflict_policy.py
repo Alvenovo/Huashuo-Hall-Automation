@@ -74,6 +74,35 @@ def test_conflict_scan_finds_pc_manager():
     assert "ASUSPCManager" in found[0].key_path
 
 
+def test_conflict_scan_skips_the_hall_registered_under_another_key():
+    """**反向**：大厅若在**别的键**上也注册了一份（比如 GUID 键），照样不许算冲突。
+
+    只按叶名 `AsusMemberCenter` 排除是不够的 —— 漏掉这一份，
+    装了大厅的机器就会被判成「有冲突」，而调用方会**直接拦住安装**：
+    等于**自己把自己锁死**，还得靠应急开关才能绕开。
+    """
+    subs, vals = _registry({
+        "{A1B2C3D4-0000-0000-0000-000000000000}": {
+            "DisplayName": "华硕大厅",
+            "UninstallString": r'"C:\Program Files (x86)\ASUS\ASUS Member Center\uninst.exe"',
+        },
+    })
+    with subs, vals:
+        assert product.find_conflicting_products() == []
+
+
+def test_conflict_scan_still_flags_an_unrelated_entry_with_a_similar_name():
+    """别把「排除自己」做成「凡是带'华硕'就放过」—— 电脑管家必须照旧报出来。"""
+    subs, vals = _registry({
+        "ASUSPCManager": {
+            "DisplayName": "华硕电脑管家",
+            "UninstallString": r'"C:\Program Files (x86)\ASUS\PCManager\uninst.exe"',
+        },
+    })
+    with subs, vals:
+        assert len(product.find_conflicting_products()) == 1
+
+
 def test_conflict_scan_dedupes_across_registry_views():
     """同一产品在 32/64 两个视图里都有一份，只该报一次。"""
     subs, vals = _registry({

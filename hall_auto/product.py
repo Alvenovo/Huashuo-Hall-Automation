@@ -28,6 +28,11 @@ CONFLICT_DISPLAY_KEYWORDS = ("电脑管家", "华硕大厅")
 # 大厅自己的卸载键叶名 —— 它不算冲突（升级流程本来就要先卸它）。
 _MANAGED_KEY_LEAF = "AsusMemberCenter"
 
+# 「这就是我们自己」的身份串：卸载命令 / 图标 / 安装目录里出现它，说明这条卸载项
+# 指的就是大厅本体。**光按叶名排除不够** —— 万一产品在别的键（比如 GUID 键）上
+# 也注册了一份，只按叶名就会把它当成"冲突"，于是**本来能装的安装被自己挡住**。
+_OWN_PRODUCT_MARKERS = ("AsusMemberCenter",)
+
 _UNINSTALL_ROOTS = (
     r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -181,6 +186,30 @@ class ConflictingProduct:
     key_path: str
 
 
+def _is_our_own_product(leaf: str, values: dict[str, str]) -> bool:
+    """这条卸载项指的就是大厅本体吗（叶名命中，或身份串命中）。
+
+    比对前**去掉非字母数字**：注册表里那条路径写作 `ASUS Member Center`（带空格），
+    而产品标识串是 `AsusMemberCenter`（不带）—— 直接比会漏。
+    """
+    if leaf == _MANAGED_KEY_LEAF:
+        return True
+    blob = "".join(
+        ch
+        for ch in " ".join(
+            values.get(name) or ""
+            for name in (
+                "UninstallString",
+                "QuietUninstallString",
+                "DisplayIcon",
+                "InstallLocation",
+            )
+        ).lower()
+        if ch.isalnum()
+    )
+    return any(marker.lower() in blob for marker in _OWN_PRODUCT_MARKERS)
+
+
 def find_conflicting_products() -> list[ConflictingProduct]:
     """扫卸载表，找出安装器会因此拒绝安装的同类产品。
 
@@ -190,16 +219,20 @@ def find_conflicting_products() -> list[ConflictingProduct]:
     电脑管家在**别的键**上，于是「有冲突」被读成「干净机器」——
     2026-09-28 新机首投 `install` 就是这么白跑一趟的（先卸了个不存在的大厅，
     再启动安装器，弹窗、退出码 2，脚本只会说「NSIS 退出码 2」）。
+
+    ⚠️ **必须排除大厅自己**：它的显示名就是「华硕大厅」，关键字必然命中。
+    不排除的话，凡是装了大厅的机器全被判成「有冲突」，
+    而调用方 `check_install_blockers()` 会**直接拦住安装** —— 等于自己把自己锁死。
     """
     found: list[ConflictingProduct] = []
     seen: set[str] = set()
     for root in _UNINSTALL_ROOTS:
         for leaf in _list_subkeys(winreg.HKEY_LOCAL_MACHINE, root):
-            if leaf == _MANAGED_KEY_LEAF:
-                continue  # 大厅自己：升级流程本来就要先卸它，不算冲突
             values = _query_values(winreg.HKEY_LOCAL_MACHINE, f"{root}\\{leaf}")
             if not values:
                 continue
+            if _is_our_own_product(leaf, values):
+                continue  # 大厅自己：升级流程本来就要先卸它，不算冲突
             name = (values.get("DisplayName") or "").strip()
             if not name or name in seen:
                 continue
