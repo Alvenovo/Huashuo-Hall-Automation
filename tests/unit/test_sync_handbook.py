@@ -923,3 +923,67 @@ def test_release_mark_actually_appears_in_the_banner(sh_real):
         "`_RELEASE_MARK` 没出现在 `_BANNER` 里 —— 覆盖自己的产物时会被误判成手工文件、"
         "于是每同步一次就多一份「旧版备份」"
     )
+
+
+def _banner_date_lines(rendered: str) -> list[str]:
+    """只挑出**横幅里那一行**日期说明。
+
+    ⚠️ 断言必须落在这一行上，**不能对整个输出做 `in`** ——
+    源文档正文里本来就有「最后更新：…」那行，对全文 `in` 是恒真的，
+    等于没测（2026-09-28 第一版就是这么写的，注入 `now()` 退化后照样绿）。
+    """
+    return [ln for ln in rendered.splitlines() if ln.startswith("> **本版对应源文档")]
+
+
+def test_release_banner_carries_the_source_documents_date(sh_real):
+    """横幅要写明**本版对应源文档的哪个日期**（2026-09-28 加）。
+
+    起因：当天桌面那份还是 09-23 的发放版，**谁都看不出来** ——
+    一线手里拿着两轮前的文档，而仓库里那个致命修复（「投错节点」）它没有。
+    光写"主文档一改这份就旧了"没用：**没有日期就没法比**。
+
+    ⚠️ 夹具日期**故意用一个不是今天的日子**：要是有人把 `_source_date` 换成
+    `datetime.now()`，横幅那行会变成"今天"、夹具这个旧日期就不见了 —— 这条会红。
+    用"今天"当夹具的话，那种退化**照样是绿的**（本项目最忌讳的假绿）。
+    """
+    src = "# 手册\n\n> 最后更新：2020-01-02\n\n正文\n"
+    out = sh_real.render_release(src, "PW-EXAMPLE", "手册.md")
+    lines = _banner_date_lines(out)
+    assert len(lines) == 1, f"横幅里该有且只有一行日期说明，实际 {len(lines)} 行：\n{out}"
+    assert "2020-01-02" in lines[0], (
+        f"横幅那行不是源文档的日期（是不是改成取当前时间了？）：{lines[0]}"
+    )
+
+
+def test_release_banner_is_deterministic(sh_real):
+    """同一个源文本渲染两次必须**逐字节一样** —— 幂等检查靠这条。
+
+    横幅里混进任何"会变的值"（最典型是 `datetime.now()`），
+    "算出来的字节"就永远不等于桌面上那份 → 每次同步都误报「旧了」+ 重写文件 + 多留档。
+
+    ⚠️ 这条只是**便宜的补充**，别指望它抓 `now()`：同一秒内调两次本来就相等。
+    真正抓 `now()` 的是上面那条（夹具用 2020-01-02）和下面那条（源文档没日期时不许插）。
+    """
+    src = "# 手册\n\n> 最后更新：2020-01-02\n\n正文\n"
+    first = sh_real.render_release(src, "PW-EXAMPLE", "手册.md")
+    second = sh_real.render_release(src, "PW-EXAMPLE", "手册.md")
+    assert first == second, "渲染不幂等 —— 横幅里混进了会变的值（大概率是 datetime.now()）"
+
+
+def test_release_banner_skips_the_date_line_when_source_has_none(sh_real):
+    """源文档没有「最后更新」那行时，**不要留一条空日期** —— 那比没有更误导。"""
+    src = "# 手册\n\n正文\n"
+    out = sh_real.render_release(src, "PW-EXAMPLE", "手册.md")
+    assert not _banner_date_lines(out), f"源文档没日期，却插了日期行：\n{out}"
+
+
+def test_release_docs_actually_declare_a_last_updated_date(sh_real):
+    """两份**发放文档**必须自报「最后更新」—— 否则上面那条横幅日期行永远不会出现。
+
+    2026-09-28 补：`新机操作清单.md` 当时压根没有这一行（`测试机操作手册.md` 有）。
+    """
+    missing = [d.name for d in sh_real.DOCS if not sh_real._source_date(d.read_text(encoding="utf-8"))]
+    assert not missing, (
+        f"这些发放文档没有「最后更新：YYYY-MM-DD」那行，横幅里就没法带日期：{missing} —— "
+        "一线因此无法判断手里的发放版是不是旧的"
+    )

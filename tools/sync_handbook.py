@@ -100,9 +100,30 @@ _BANNER = (
     "> 主文档一改这份就旧了 —— 重跑 `tools\\sync_handbook.py` 重新生成，别拿它当权威版本。"
 )
 
+# 横幅第 4 行：**源文档自报的日期**。源文档没有「最后更新」那行时整行不插。
+#
+# 2026-09-28 加：当天真踩过「桌面那份还是 09-23 的发放版、**谁都看不出来**」——
+# 一线手里拿着两轮前的文档，而仓库里那个致命修复（「投错节点」）它没有。
+# 光写"主文档一改这份就旧了"**没用：没有日期就没法比**。
+#
+# ⚠️ **不能用"生成那一刻"的时间**：那样每跑一次横幅就变一次，
+# "算出来的字节"永远不等于桌面上那份 —— 幂等检查会一直误报「旧了」并每次重写文件。
+# 用**源文档自报的「最后更新」**：源不变 → 输出不变（幂等），
+# 而且它正好就是读者要拿去和仓库比对的那个值。
+_BANNER_DATE_LINE = "> **本版对应源文档「最后更新：{date}」** —— 拿它和仓库那份比，对不上就是旧的。"
+
+# 从源文档里抠「最后更新：YYYY-MM-DD」（半角/全角冒号都认）。
+_SRC_DATE_RE = re.compile(r"最后更新[：:]\s*(\d{4}-\d{2}-\d{2})")
+
 # 本脚本生成物的指纹：横幅里这一句出现，就说明那份文件是**我们上一轮写的**。
 # 用途见 `_is_our_output()` —— 决定覆盖前要不要留档。（测试里锁着它必须在 `_BANNER` 里。）
 _RELEASE_MARK = "发放版（含明文凭据）"
+
+
+def _source_date(text: str) -> str:
+    """源文档自报的「最后更新」日期；没有就返回空串（横幅少插一行）。"""
+    m = _SRC_DATE_RE.search(text)
+    return m.group(1) if m else ""
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -147,7 +168,11 @@ def leftover_placeholders(text: str) -> list[str]:
 
 
 def render_release(text: str, password: str, source_name: str) -> str:
-    """把占位符换成真值，并在标题下插一条「发放版」横幅。"""
+    """把占位符换成真值，并在标题下插一条「发放版」横幅。
+
+    **纯函数**：同一个 `text` 进去，出来的字节永远一样（横幅里的日期取自 `text` 自身，
+    不是 `datetime.now()`）—— 幂等检查靠的就是这条，见 `_BANNER_DATE_LINE` 上面的注释。
+    """
     nl = _newline_of(text)
     body = text
     for token in PASSWORD_PLACEHOLDERS:
@@ -160,6 +185,9 @@ def render_release(text: str, password: str, source_name: str) -> str:
     while rest and not rest[0].strip():
         rest.pop(0)
     banner = _BANNER.format(name=source_name).split("\n")
+    src_date = _source_date(text)
+    if src_date:
+        banner.append(_BANNER_DATE_LINE.format(date=src_date))
     return nl.join(lines[:at] + [""] + banner + [""] + rest)
 
 
