@@ -731,6 +731,72 @@ def test_elevated_broker_polls_until_the_result_lands(root, monkeypatch, tmp_pat
     assert written["reset_fixture"] is False, "install 不复位夹具"
 
 
+def test_elevated_progress_lands_in_the_shared_task_log(root, monkeypatch, tmp_path):
+    """提权段的进度必须写进**共享盘上的任务日志**，不能只 print 到 stdout。
+
+    2026-09-28 实测的坑：新机首投 `install`，控制机侧日志停在
+    「[env] 本段输出不落这个日志」那一行，之后 **38 分钟零信号**，
+    无从判断「在跑」还是「卡死」。原因是提权段可能跑几十分钟，而这段时间里
+    控制机唯一看得到的只有共享盘上的这份日志 —— 只 print 到 stdout 的话，
+    agent 的终端没人盯就等于没有，**与节点死机同形**。
+    """
+    log = tmp_path / "node.log"
+    calls = {"n": 0}
+
+    monkeypatch.setattr(farm_agent, "write_request", lambda **kw: "REQ-1")
+    monkeypatch.setattr(farm_agent, "trigger_task", lambda: (True, "已触发"))
+
+    def _fake_read_result(request_id: str) -> dict:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return {}  # 提权侧还在跑，逼出心跳
+        return {"request_id": request_id, "exit_code": 0}
+
+    monkeypatch.setattr(farm_agent, "read_result_for", _fake_read_result)
+    monkeypatch.setattr(farm_agent.time, "sleep", lambda _s: None)
+    # 心跳阈值归零：每次轮询都该打一拍，不必真等 30 秒
+    monkeypatch.setattr(farm_agent, "ELEVATION_HEARTBEAT_SECONDS", 0)
+
+    rc, _creds = farm_agent.run_suite_elevated(
+        "install", 1, 1, log, task_id="T1", task_env={}
+    )
+    assert rc == 0
+
+    text = log.read_text(encoding="utf-8")
+    assert "已交给提权通道" in text, "交出去这件事本身就要落日志，否则控制机看不到它已开始"
+    assert "进行中" in text, "轮询期间的心跳必须落日志 —— 这正是控制机判断'在跑'的唯一依据"
+    assert "退出码 0" in text, "结果也要落日志，控制机不该只能靠 done/ 里的回执才知道结束"
+    assert "最多等 4 小时" in text, (
+        "要写明等待上界：不写的话，运维看到日志停住会以为已经卡死，"
+        "实际节点最长会安安静静等 4 小时（ELEVATION_TIMEOUT_SECONDS）"
+    )
+
+
+def test_elevated_giving_up_is_written_to_the_shared_task_log(root, monkeypatch, tmp_path):
+    """提权段**放弃等待**这件事也必须落共享日志 —— 否则控制机永远等不到解释。
+
+    超时返回 1 之后节点会去跑下一个套件、最后写回执，但那是几小时以后；
+    在此之前控制机看到的是一份不动的日志。把「等多久算放弃、去哪里看真因」
+    写进同一份日志，现场就不用猜。
+    """
+    log = tmp_path / "node.log"
+
+    monkeypatch.setattr(farm_agent, "write_request", lambda **kw: "REQ-1")
+    monkeypatch.setattr(farm_agent, "trigger_task", lambda: (True, "已触发"))
+    monkeypatch.setattr(farm_agent, "read_result_for", lambda _rid: {})
+    monkeypatch.setattr(farm_agent.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(farm_agent, "ELEVATION_TIMEOUT_SECONDS", 0)
+
+    rc, _creds = farm_agent.run_suite_elevated(
+        "install", 1, 1, log, task_id="T1", task_env={}
+    )
+    assert rc == 1, "等不到结果要返回失败码，让 agent 继续跑后面的套件"
+
+    text = log.read_text(encoding="utf-8")
+    assert "还没回结果" in text, "放弃等待要落日志，控制机才知道不用再等"
+    assert "elevated_run.log" in text, "要指路到真因所在（节点本机的提权段输出）"
+
+
 def test_elevated_broker_reports_a_failed_trigger(root, monkeypatch, tmp_path, capsys):
     """触发不了计划任务时**不许假装跑过**：返回非 0，并给出排查方向。
 
@@ -743,11 +809,14 @@ def test_elevated_broker_reports_a_failed_trigger(root, monkeypatch, tmp_path, c
         farm_agent, "read_result_for", _boom_if_called
     )
 
+    log = tmp_path / "n.log"
     rc, _creds = farm_agent.run_suite_elevated(
-        "install", 1, 1, tmp_path / "n.log", task_id="T1", task_env={}
+        "install", 1, 1, log, task_id="T1", task_env={}
     )
     assert rc == 2
     assert "提权通道启动失败" in capsys.readouterr().err
+    # 启动失败只打 stderr 的话，终端一关就没了；落一份到共享日志，控制机才看得到
+    assert "提权通道启动失败" in log.read_text(encoding="utf-8")
 
 
 def test_manual_prompt_is_skipped_for_a_smoke_task(root, monkeypatch):

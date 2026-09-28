@@ -348,6 +348,27 @@ def run_suite(
     return proc.returncode, creds
 
 
+def _append_log(log_path: Path, text: str) -> None:
+    """往农场任务日志追一行。**写不动不抛** —— 日志落不了盘不该把整轮跑批带下水。
+
+    为什么要单独有这个东西：提权段可能跑几十分钟（`install` 的 NSIS + 等版本 +
+    进「关于」页 OCR 两遍），而**控制机唯一看得到的就是共享盘上的这份日志**。
+    只 `print` 到 stdout 的话，agent 的终端没人盯，控制机侧看到的是
+    「日志停在投任务那一行，之后一片死寂」——**与节点死机同形**，现场只能干等
+    （2026-09-28 实测：新机首投 `install`，38 分钟零信号，无从判断在跑还是卡住）。
+    """
+    try:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except OSError:
+        pass
+
+
+def _beat_stamp() -> str:
+    """心跳行的时间前缀，与日志里 `===== <ISO> 提权段 xxx =====` 那套一致。"""
+    return datetime.now().isoformat(timespec="seconds")
+
+
 def run_suite_elevated(
     suite_name: str,
     shard_id: int,
@@ -399,15 +420,22 @@ def run_suite_elevated(
 
     ok, note = trigger_task()
     if not ok:
-        print(
-            f"  ⚠ 提权通道启动失败：{note}\n"
-            f"    排查：① 计划任务 {ELEVATION_TASK_NAME} 在不在（schtasks /Query /TN {ELEVATION_TASK_NAME}）；"
-            "② 不在就用管理员重跑 tools\\bootstrap_machine.ps1（幂等）。",
-            file=sys.stderr, flush=True,
+        detail = (
+            f"⚠ 提权通道启动失败：{note}\n"
+            f"  排查：① 计划任务 {ELEVATION_TASK_NAME} 在不在（schtasks /Query /TN {ELEVATION_TASK_NAME}）；"
+            "② 不在就用管理员重跑 tools\\bootstrap_machine.ps1（幂等）。"
         )
+        print(f"  {detail}", file=sys.stderr, flush=True)
+        _append_log(log_path, f"[{_beat_stamp()}] {detail}")
         return 2, creds
 
     print(f"  已交给提权通道（{ELEVATION_TASK_NAME}），等待结果…", flush=True)
+    _append_log(
+        log_path,
+        f"[{_beat_stamp()}] 已交给提权通道（{ELEVATION_TASK_NAME}），等待结果…"
+        f"（本段最多等 {ELEVATION_TIMEOUT_SECONDS / 3600:.0f} 小时；"
+        "提权侧的 pytest 输出在**节点本机** reports\\_elev\\elevated_run.log，不在这份日志里）",
+    )
     started = time.monotonic()
     last_beat = started
     while True:
@@ -419,19 +447,27 @@ def run_suite_elevated(
                 f"（{time.monotonic() - started:.0f}s，日志 reports\\_elev\\elevated_run.log）",
                 flush=True,
             )
+            _append_log(
+                log_path,
+                f"[{_beat_stamp()}] 提权段 {suite_name} 退出码 {rc}"
+                f"（{time.monotonic() - started:.0f}s）",
+            )
             return rc, creds
         elapsed = time.monotonic() - started
         if elapsed >= ELEVATION_TIMEOUT_SECONDS:
-            print(
-                f"  ⚠ 提权段 {suite_name} 等了 {elapsed / 60:.0f} 分钟还没回结果。\n"
-                "    真装真卸可能要十几分钟，但如果任务栏里没有安装向导在动，"
-                "就是提权侧没跑起来：看 reports\\_elev\\elevated_run.log 和 result.json。",
-                file=sys.stderr, flush=True,
+            detail = (
+                f"⚠ 提权段 {suite_name} 等了 {elapsed / 60:.0f} 分钟还没回结果。\n"
+                "  真装真卸可能要十几分钟，但如果任务栏里没有安装向导在动，"
+                "就是提权侧没跑起来：看 reports\\_elev\\elevated_run.log 和 result.json。"
             )
+            print(f"  {detail}", file=sys.stderr, flush=True)
+            _append_log(log_path, f"[{_beat_stamp()}] {detail}")
             return 1, creds
         if time.monotonic() - last_beat >= ELEVATION_HEARTBEAT_SECONDS:
             last_beat = time.monotonic()
-            print(f"  …提权段 {suite_name} 进行中（已 {elapsed:.0f}s）", flush=True)
+            beat = f"…提权段 {suite_name} 进行中（已 {elapsed:.0f}s）"
+            print(f"  {beat}", flush=True)
+            _append_log(log_path, f"[{_beat_stamp()}] {beat}")
         time.sleep(ELEVATION_POLL_SECONDS)
 
 
