@@ -10,12 +10,19 @@
 所以断言**不看运行结果，只看源码结构** —— 坑就在"忘了写"，
 而"忘了写"跑本机是**看不出来的**（本机真装了，守卫写没写都是绿的）。
 
-## 两条规则
+## 三条规则
 
 1. **凡是要启动大厅的 fixture / 测试函数，参数里必须有 `installed`。**
    共享守卫在 `tests/launch/conftest.py`。
 2. **各模块不许自己再定义一份 `installed`。** 原来 `test_p0_launch.py` 自己抄了一份、
    另外 4 个模块没抄 —— 就是因为可以各写各的，才会漏。守卫只能有一份。
+3. **凡从 `cfg` 取机器目录的入口，必须自己判存在（`is_dir()` / `is_file()`）再往下用。**
+   规则 1 只管「本机装没装大厅」，管不到别的机器前提。
+   2026-09-28 实测：`test_personal_storage_all_signed` 拿
+   `cfg.security.personal_storage_dir`（`C:/Program Files (x86)/ASUS/PersonalStorage`，
+   **随产品安装才出现**）直接去镜像，机器上没有就抛 `SecurityToolError` ——
+   而**同套件的另两条**（`test_control_panel_info` / `test_manifest_matches_package`）
+   都规规矩矩 skip。缺目录是环境问题，不是「签名有问题」，红在这里是假红。
 
 ## 为什么只查 fixture / test 函数
 
@@ -42,6 +49,13 @@ LAUNCH_ENTRYPOINTS = ("start_fresh", "launch_until_ready")
 
 # 共享守卫的名字。
 GUARD_NAME = "installed"
+
+# 「机器目录」的识别口径：从 cfg 取来、名字以 `_dir` 结尾的字段。
+# 它们存不存在取决于**这台机器装了什么**，不取决于代码 —— 缺了要 skip，不能红。
+MACHINE_DIR_SUFFIX = "_dir"
+
+# 判存在的方式：Path 的这几个方法，或直接 skip。
+EXISTENCE_CHECKS = ("is_dir", "is_file", "exists")
 
 
 def _module_files() -> list[Path]:
@@ -154,4 +168,48 @@ def test_every_entry_that_launches_the_app_has_the_install_guard():
         "这些入口会启动大厅，但没有安装守卫 —— 全新机器上会吐 ERROR 而不是 skip：\n  "
         + "\n  ".join(offenders)
         + f"\n修法：给它们加一个 `{GUARD_NAME}` 参数（共享守卫在 tests/launch/conftest.py）。"
+    )
+
+
+def _machine_dir_attrs(node: ast.AST) -> list[str]:
+    """函数里引用的「机器目录」字段名（`cfg.security.personal_storage_dir` -> 该名）。"""
+    return sorted(
+        {
+            sub.attr
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Attribute) and sub.attr.endswith(MACHINE_DIR_SUFFIX)
+        }
+    )
+
+
+def _guards_existence(node: ast.AST) -> bool:
+    """函数里有没有「判存在」的动作。"""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and _called_name(sub) == "skip":
+            return True
+        if isinstance(sub, ast.Attribute) and sub.attr in EXISTENCE_CHECKS:
+            return True
+    return False
+
+
+def test_every_machine_dir_use_is_guarded_by_an_existence_check():
+    """凡用 `cfg.*_dir` 的入口，必须先判存在（或 skip）—— 缺目录是环境问题，不是缺陷。
+
+    这条抓的是「**声明了前提，却没实现"缺则 skip"**」这一类 —— 与那 22 条 ERROR 同源。
+    """
+    offenders = []
+    for path in _module_files():
+        for node in _entry_functions(path):
+            dirs = _machine_dir_attrs(node)
+            if not dirs:
+                continue
+            if _guards_existence(node):
+                continue
+            offenders.append(f"{path.name}::{node.name}（用了 {'/'.join(dirs)}）")
+    assert not offenders, (
+        "这些入口直接用了机器上的目录，却没有判存在 —— 机器上没这个目录时会**硬失败**，"
+        "而它本该是 skip：\n  "
+        + "\n  ".join(offenders)
+        + "\n修法：用之前先 `if not path.is_dir(): pytest.skip(...)`，"
+        "并在 skip 文案里写清**要验这条得先让本机具备什么**。"
     )

@@ -7,13 +7,28 @@ from pathlib import Path
 
 from hall_auto.config import Config
 from hall_auto.fetch import FetchResult, configured_filenames, ensure_package
-from hall_auto.product import InstalledProduct, image_running, read_installed, stop_product
+from hall_auto.product import (
+    ConflictingProduct,
+    InstalledProduct,
+    find_conflicting_products,
+    image_running,
+    read_installed,
+    stop_product,
+)
 from hall_auto.version import expected_version_from_setup_name, versions_equal
 from hall_auto.waiting import wait_until
 
 
 class InstallError(RuntimeError):
     pass
+
+
+class InstallBlocked(InstallError):
+    """被「同类产品」挡住，安装器根本没启动。
+
+    单独一类是为了**别触发升级流程的失败重试** —— 那个重试会先卸掉已装的大厅
+    再装一遍；冲突没解决时第二遍照样失败，白白把大厅卸了。
+    """
 
 
 def resolve_setup(cfg: Config, filename: str, *, allow_download: bool = True) -> Path:
@@ -42,7 +57,37 @@ def resolve_setup_full(cfg: Config, filename: str, *, allow_download: bool = Tru
         raise InstallError(f"取安装包失败 {filename}：{exc}") from exc
 
 
-def _run_nsis(exe: Path, timeout_sec: int) -> None:
+def _ignore_conflict() -> bool:
+    """跳过「同类产品」拦截（应急开关）。"""
+    return os.environ.get("HALL_IGNORE_INSTALL_CONFLICT") == "1"
+
+
+def _conflict_detail(conflicts: list[ConflictingProduct]) -> str:
+    names = "、".join(f"{c.display_name}（{c.key_path}）" for c in conflicts)
+    return (
+        f"检测到会让安装器拒绝安装的同类产品：{names}\n"
+        "    安装器（NSIS .onInit）一发现它们在装就弹窗拒绝，原文：\n"
+        "      「您已安装了华硕大厅或华硕电脑管家，请先卸载该应用，再运行安装向导！」\n"
+        "    点掉「确定」后以**退出码 2** 结束 —— 以前这里只会丢回一句\n"
+        "    「NSIS 退出码 2」，看不出是被谁挡的（2026-09-28 实测）。\n"
+        "    先卸载上面这些再重跑。确需跳过这道拦截：设 HALL_IGNORE_INSTALL_CONFLICT=1。"
+    )
+
+
+def _conflict_note() -> str:
+    """给「安装器非 0 退出 / 超时」补一段真因说明。探不到就返回空串（不干扰原报错）。"""
+    conflicts = find_conflicting_products()
+    if not conflicts:
+        return ""
+    return "\n  ⚠ " + _conflict_detail(conflicts).replace("\n    ", "\n  ")
+
+
+def _run_nsis(exe: Path, timeout_sec: int, *, hint_conflict: bool = False) -> None:
+    """跑一次 NSIS（`/S` 静默）。
+
+    `hint_conflict=True` 时，失败信息会补上「是不是被同类产品挡了」——
+    只对**安装**用，卸载路径不需要（那儿的退出码 2 是另一回事）。
+    """
     if not exe.is_file():
         raise InstallError(f"找不到可执行文件: {exe}")
     proc = subprocess.Popen(
@@ -51,13 +96,18 @@ def _run_nsis(exe: Path, timeout_sec: int) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    note = _conflict_note() if hint_conflict else ""
     try:
         code = proc.wait(timeout=timeout_sec)
     except subprocess.TimeoutExpired as exc:
         proc.kill()
-        raise InstallError(f"NSIS 超时: {exe} ({timeout_sec}s)") from exc
+        raise InstallError(
+            f"NSIS 超时: {exe} ({timeout_sec}s)"
+            "（静默参数压不住模态弹窗：没人点「确定」，进程就一直挂着）"
+            + note
+        ) from exc
     if code not in (0, None):
-        raise InstallError(f"NSIS 退出码 {code}: {exe}")
+        raise InstallError(f"NSIS 退出码 {code}: {exe}{note}")
     # NSIS /S 常先返回、解包子进程还在。进程消失不是完成信号，后面靠版本轮询。
     deadline = time.time() + min(30, timeout_sec)
     while time.time() < deadline and image_running(exe.stem):
@@ -95,16 +145,36 @@ def uninstall_hall(cfg: Config) -> None:
     _wait_until(lambda: read_installed() is None, cfg.timeouts.version_settle_sec, "等待卸载完成")
 
 
+def check_install_blockers() -> None:
+    """安装器会不会被「同类产品」挡住 —— 会就直接报，**不启动安装器**。
+
+    **为什么必须在启动安装器之前拦**：安装器遇到冲突弹的是**模态对话框**，
+    `/S` 静默参数压不住它。没人点「确定」，进程就一直挂着，最后报的是
+    「NSIS 超时」—— 比真因更误导（看着像装得慢，其实压根没开始装）。
+    就算有人点掉，也只会拿到「NSIS 退出码 2」，一样看不出是被谁挡的。
+    （2026-09-28 新机实测：`install` 两个用例双双退出码 2，
+    截图里才看到那个「您已安装了华硕大厅或华硕电脑管家」的弹窗。）
+    """
+    if _ignore_conflict():
+        return
+    conflicts = find_conflicting_products()
+    if conflicts:
+        raise InstallBlocked(_conflict_detail(conflicts))
+
+
 def install_setup(cfg: Config, setup_path: Path) -> InstalledProduct:
     expected = expected_version_from_setup_name(setup_path.name)
     if not setup_path.is_file():
         raise InstallError(f"安装包不存在: {setup_path}")
+    check_install_blockers()
     stop_product(cfg.timeouts.process_stop_sec)
-    _run_nsis(setup_path, cfg.timeouts.install_sec)
+    _run_nsis(setup_path, cfg.timeouts.install_sec, hint_conflict=True)
     return wait_version(expected, cfg.timeouts.install_sec)
 
 
 def install_baseline_clean(cfg: Config) -> InstalledProduct:
+    # 先判冲突、再卸大厅：明知装不上去还把大厅卸了，机器只会更差。
+    check_install_blockers()
     uninstall_hall(cfg)
     return install_setup(cfg, resolve_setup(cfg, cfg.baseline_setup))
 
@@ -316,6 +386,8 @@ def upgrade_to_latest(cfg: Config) -> InstalledProduct:
     latest = resolve_setup(cfg, cfg.latest_setup)
     try:
         return install_setup(cfg, latest)
+    except InstallBlocked:
+        raise  # 冲突挡住的，重试也是白卸一次大厅
     except InstallError:
         uninstall_hall(cfg)
         return install_setup(cfg, latest)

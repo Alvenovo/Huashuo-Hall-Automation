@@ -49,11 +49,28 @@ def test_package_all_signed(cfg, extracted_package):
 
 
 def test_personal_storage_all_signed(cfg):
+    """个人空间盘目录里的可签名文件必须全部有有效签名。
+
+    需要**目录存在**守卫：`security.personal_storage_dir` 指的是
+    `C:/Program Files (x86)/ASUS/PersonalStorage` —— 这是**随产品安装才出现**的路径，
+    产品没装（或装在别处）时 `mirror_signable_files` 直接抛 `SecurityToolError`。
+
+    2026-09-28 实测：新机全量跑，`security` 套件里**就这一条红**，而同套件的
+    `test_control_panel_info` / `test_manifest_matches_package` 都规规矩矩 skip ——
+    缺目录是**环境问题，不是"签名有问题"**，红在这里是假红。
+    （与 `launch` 那 22 条 ERROR 同源：声明了前提，却没实现"缺则 skip"。）
+    """
     if not cfg.security.configured:
         pytest.skip("security.tools_dir 未配置（内部工具不进仓库）")
+    src = Path(cfg.security.personal_storage_dir)
+    if not src.is_dir():
+        pytest.skip(
+            f"个人空间盘目录不存在: {src}"
+            "（产品未装或装在别处；要验这条先让本机装上带个人空间盘的版本）"
+        )
     mirror = security.work_root(cfg) / "ps_mirror"
-    count = security.mirror_signable_files(Path(cfg.security.personal_storage_dir), mirror)
-    assert count > 0, f"个人空间盘目录没有可检文件: {cfg.security.personal_storage_dir}"
+    count = security.mirror_signable_files(src, mirror)
+    assert count > 0, f"个人空间盘目录没有可检文件: {src}"
     result = security.run_checkappv(mirror, cfg)
     assert result.unsigned_count == 0, f"个人空间盘存在未签名文件: {result.unsigned_files}"
 

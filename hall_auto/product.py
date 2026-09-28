@@ -14,6 +14,24 @@ import winreg
 UNINSTALL_KEY = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\AsusMemberCenter"
 UNINSTALL_KEY_32 = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\AsusMemberCenter"
 EXE_NAME = "AsusMemberCenter.exe"
+
+# 「同类产品」：安装器（NSIS 的 .onInit）一检测到这些在装就**拒绝安装**。
+# 2026-09-28 实测弹窗原文：
+#   「您已安装了华硕大厅或华硕电脑管家，请先卸载该应用，再运行安装向导！」
+# 点掉「确定」后安装器以**退出码 2** 结束（NSIS 脚本里 `Abort` 的返回码）。
+#
+# 为什么必须单独扫：`read_installed()` 只查大厅自己那两把卸载键，
+# **看不见电脑管家** —— 于是脚本把「有冲突」读成了「干净机器」，
+# 先跑一次什么都没做的卸载、再启动安装器，最后只丢回一句「NSIS 退出码 2」。
+CONFLICT_DISPLAY_KEYWORDS = ("电脑管家", "华硕大厅")
+
+# 大厅自己的卸载键叶名 —— 它不算冲突（升级流程本来就要先卸它）。
+_MANAGED_KEY_LEAF = "AsusMemberCenter"
+
+_UNINSTALL_ROOTS = (
+    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+)
 DEFAULT_INSTALL_DIR = Path(r"C:\Program Files (x86)\ASUS\ASUS Member Center")
 
 CRITICAL_PROCESS_NAMES = ("AsusMemberCenter",)
@@ -136,6 +154,65 @@ def read_installed() -> InstalledProduct | None:
             key_path=f"{hive_name}\\{subkey}",
         )
     return None
+
+
+def _list_subkeys(hive: int, subkey: str) -> list[str]:
+    """列出某把注册表键下的子键名。键不存在或读不动一律返回空表（只读探测，不抛）。"""
+    try:
+        with winreg.OpenKey(hive, subkey) as key:
+            names: list[str] = []
+            i = 0
+            while True:
+                try:
+                    names.append(winreg.EnumKey(key, i))
+                except OSError:
+                    break
+                i += 1
+            return names
+    except OSError:
+        return []
+
+
+@dataclass(frozen=True)
+class ConflictingProduct:
+    """会让安装器拒绝安装的「同类产品」（电脑管家等）。"""
+
+    display_name: str
+    key_path: str
+
+
+def find_conflicting_products() -> list[ConflictingProduct]:
+    """扫卸载表，找出安装器会因此拒绝安装的同类产品。
+
+    **只读**，不改任何东西；读不动就返回空表（探测失败不该把跑批带下水）。
+
+    为什么不能靠 `read_installed()`：它只查 `AsusMemberCenter` 那两把键，
+    电脑管家在**别的键**上，于是「有冲突」被读成「干净机器」——
+    2026-09-28 新机首投 `install` 就是这么白跑一趟的（先卸了个不存在的大厅，
+    再启动安装器，弹窗、退出码 2，脚本只会说「NSIS 退出码 2」）。
+    """
+    found: list[ConflictingProduct] = []
+    seen: set[str] = set()
+    for root in _UNINSTALL_ROOTS:
+        for leaf in _list_subkeys(winreg.HKEY_LOCAL_MACHINE, root):
+            if leaf == _MANAGED_KEY_LEAF:
+                continue  # 大厅自己：升级流程本来就要先卸它，不算冲突
+            values = _query_values(winreg.HKEY_LOCAL_MACHINE, f"{root}\\{leaf}")
+            if not values:
+                continue
+            name = (values.get("DisplayName") or "").strip()
+            if not name or name in seen:
+                continue
+            lowered = name.lower()
+            if any(kw.lower() in lowered for kw in CONFLICT_DISPLAY_KEYWORDS):
+                seen.add(name)
+                found.append(
+                    ConflictingProduct(
+                        display_name=name,
+                        key_path=f"HKLM\\{root}\\{leaf}",
+                    )
+                )
+    return found
 
 
 def agreement_config_path() -> Path | None:
