@@ -432,6 +432,46 @@ def test_both_docs_use_the_policy_proof_cmd_entry(doc_texts):
         )
 
 
+# ---------------- 发放文档不许写死"具体某台测试机"的名字 ----------------
+#
+# 2026-09-28 真机踩的：两份发放文档里**所有**投任务示例都写死 `--nodes DESKTOP-DOHED68`
+# （= 第一台测试机的真名）。新机的一线照着抄 → 任务投给了**另一台机器**，
+# 而新机 agent 只会一直打「无任务」、**两边都不报错**。用户原话：
+# 「你这个新机操作清单上不应该是在哪台测试机上都能够适配的吗」—— 对，就该适配。
+#
+# 更坑的是：文档里"两边名字必须一致"的警告**拦不住它** ——
+# 因为被比较的两端（节点心跳示例 / 控制机 `--nodes` 示例）**是同一个写死的名字**，
+# 互相一致、却都不是眼前这台机器。**警告看着被满足了，其实一点用没有。**
+#
+# 规则：发放文档里只许出现**常量机器** —— 共享盘宿主（每台机器都要连它，写死是对的）；
+# **变量机器**（具体某台测试机）一律用 `<节点名>` 占位符，并写明
+# 「填节点 agent 心跳里打出来的那个名字」。尖括号还顺带保证**照抄会直接报语法错**，
+# 不会像写死的真名那样"悄悄地"投给别的机器。
+_ALLOWED_LITERAL_HOSTS = {"LAPTOP-VS5F7HF4"}  # 共享盘宿主：常量，写死是对的
+_HOSTNAME_LIKE = re.compile(r"\b(?:DESKTOP|LAPTOP)-[A-Z0-9]{4,}\b")
+
+
+def test_release_docs_never_hardcode_a_test_machine_name(doc_texts):
+    """两份发放文档里不许出现具体某台**测试机**的主机名 —— 只许写共享盘宿主。
+
+    发新机当天最容易踩：手里的清单还是上一台的命令，照抄 → 任务投给旧机器。
+    症状是「新机 agent 一直无任务、控制机「待执行」不降」，**两边都不报错**，
+    和"节点连不上农场"长得一模一样（见《运行手册.md》「投错节点」）。
+    """
+    bad: list[str] = []
+    for name, text in doc_texts.items():
+        for hit in sorted(set(_HOSTNAME_LIKE.findall(text))):
+            if hit not in _ALLOWED_LITERAL_HOSTS:
+                bad.append(f"{name}: {hit}")
+    assert not bad, (
+        "发放文档里写死了具体测试机的名字（发到别的机器上照着抄就是错的）：\n  "
+        + "\n  ".join(bad)
+        + f"\n只有 {sorted(_ALLOWED_LITERAL_HOSTS)}（共享盘宿主）是常量、可以写死；"
+        "测试机名每台都不一样，必须写成 `<节点名>` 占位符，"
+        "并说明「填节点 agent 心跳里打出来的那个名字」"
+    )
+
+
 def test_install_git_wrapper_is_policy_proof():
     """`.cmd` 外壳本身：存在、纯 ASCII + CRLF + 无 BOM、正文带 Bypass。
 
