@@ -10,6 +10,7 @@ from hall_auto.login import (
     BIND_DIALOG_TIMEOUT_SEC,
     _by_aid,
     _by_name,
+    ask_code_until_accepted,
     close_microsoft_login,
     dismiss_bind_dialog,
     find_bind_dialog,
@@ -68,6 +69,9 @@ def _ask_code(prompt: str) -> str:
     全文件只有这一处 `input()`，是刻意的：让"问人之前先切窗口"变成**结构性的**，
     而不是散在四处、少写一次就多一次「码发了、人却在别的窗口里干等」。
     `focus_console()` 拿不到窗口就返回 False，**不该因此失败** —— 人手动切一下即可。
+
+    验证码输错时**会被 `ask_code_until_accepted` 再调一次**（同一个码不重发、
+    只重问），所以这里每次都重新 `focus_console()`：重问时大厅窗口可能又被顶到前面了。
     """
     focus_console()
     return input(prompt).strip()
@@ -254,6 +258,9 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
 
     **登录成功后**如果弹出「绑定手机号」（没绑过的账号才弹），会接着自动
     填号 → 点获取验证码 → 问人要短信码 → 提交（见 `_bind_phone_if_prompted`）。
+
+    验证码**输错了不用重跑整条**（2026-09-28）：脚本发现码没被接受会在原地
+    再问一次，最多 `CODE_MAX_ATTEMPTS` 次，**不会重发码**；随时直接回车放弃。
     """
     email = cfg.microsoft_account()
     if not email:
@@ -273,13 +280,25 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
         if state != "email_otp":
             pytest.skip(f"微软没走邮箱验证码分支（当前 {state}）")
         microsoft_send_code(ms_win)
-        code = _ask_code("微软已向配置的邮箱发送登录代码。输入邮箱收到的验证码（直接回车放弃）: ")
-        if not code:
+
+        def _submit_ms_code(code: str) -> str:
+            """填码 + 提交 + 等回大厅，**三步绑成一次"尝试"** 给重试循环用。
+
+            必须绑在一起：只提交不等结果的话，码错的失败要等下一轮才暴露，
+            人会以为"这次成功了"。
+            """
+            submit_microsoft_code(ms_win, code)
+            return wait_microsoft_logged_in(ready_pid, ms_win)
+
+        status, name = ask_code_until_accepted(
+            _ask_code,
+            _submit_ms_code,
+            what="微软已向配置的邮箱发送登录代码。输入邮箱收到的验证码",
+        )
+        if status != "ok":
             pytest.skip("人工放弃回填（登录代码已发出）")
-        submit_microsoft_code(ms_win, code)
-        name = wait_microsoft_logged_in(ready_pid)
         assert logged_in(ready_pid), "提交验证码后仍未进入已登录态"
-        assert "已登录" in name, f"已登录态用户区文案异常: {name!r}"
+        assert "已登录" in str(name), f"已登录态用户区文案异常: {name!r}"
         # 没绑过手机号的账号，登录成功后会弹绑定弹窗 —— 它挡着主界面，
         # 不在这里处理掉，下面的 logout() 就点不动（模态窗）。
         _bind_phone_if_prompted(cfg, ready_pid)
@@ -301,6 +320,10 @@ def test_sms_login_manual(cfg, ready_pid):
     **登录成功后**如果弹出「绑定手机号」（没绑过的账号才弹），会接着自动
     填号 → 点获取验证码 → 问人要短信码 → 提交（见 `_bind_phone_if_prompted`），
     所以这台机器上这条最多要人工回填 **两个** 短信码。
+
+    验证码**输错了不用重跑整条**（2026-09-28）：脚本发现码没被接受会在原地
+    再问一次，最多 `CODE_MAX_ATTEMPTS` 次，**不会重发码**（短信有服务端限流，
+    重跑一次就多一次超限风险）；随时直接回车放弃。
     """
     user, _ = cfg.test_account()
     if not user:
@@ -308,12 +331,15 @@ def test_sms_login_manual(cfg, ready_pid):
     _require_interactive_tty("短信登录要人工回填验证码")
     logout(ready_pid)
     request_sms_code(ready_pid, user)
-    code = _ask_code("输入手机收到的短信验证码（直接回车放弃）: ")
-    if not code:
+    status, name = ask_code_until_accepted(
+        _ask_code,
+        lambda code: login_with_sms_code(ready_pid, code),
+        what="输入手机收到的短信验证码",
+    )
+    if status != "ok":
         pytest.skip("人工放弃回填（验证码已发出）")
-    name = login_with_sms_code(ready_pid, code)
     assert logged_in(ready_pid)
-    _assert_user_area_shows(user, name)
+    _assert_user_area_shows(user, str(name))
     # 同微软那条：没绑过的账号会弹绑定弹窗，必须在 logout 之前处理掉。
     _bind_phone_if_prompted(cfg, ready_pid)
     logout(ready_pid)
@@ -332,6 +358,9 @@ def test_forgot_password_reset_manual(cfg, ready_pid):
     还原程放在 finally：只要第一次提交发出去了，哪怕新密码验证那步报错，也一定把
     密码压回 OLD（若本就是 OLD，再设一次无害），保证账户不会卡在 NEW 上。
     2026-09-16 先以「点到发送为止」探针验过页面结构和发送链路，本版把真正的重置闭上。
+
+    两个码**输错了都能在原地重输**（2026-09-28，同一个码不重发）。人放弃不提交时
+    `submitted` 立不起来，还原程**跳过** —— 密码本来就没动，不该再要人输一个码。
     """
     user, old_password = cfg.test_account()
     new_password = cfg.new_password()
@@ -350,26 +379,44 @@ def test_forgot_password_reset_manual(cfg, ready_pid):
         )
     assert _by_name(ready_pid, "Text", "忘记密码", exact=True) is not None, "忘记密码页缺标题「忘记密码」"
     request_forgot_sms(ready_pid, user)
-    code1 = _ask_code("【第1次·改成新密码】输入手机收到的重置验证码（回车放弃）: ")
-    if not code1:
-        pytest.skip("人工放弃（验证码已发出，密码尚未修改）")
+    submitted = False
+
+    def _submit_new(code: str) -> dict:
+        """第一程提交。**只要被调用过就把 submitted 立起来** —— 密码可能已经变了，
+        还原程必须跑，哪怕这次提交本身报错。"""
+        nonlocal submitted
+        submitted = True
+        return submit_forgot_reset(ready_pid, code, new_password)
+
     # 提交一旦发出，密码就可能已变 NEW；放进 try，让 finally 的还原程兜住提交本身报错的情况
     try:
-        submit_forgot_reset(ready_pid, code1, new_password)
+        status, _ = ask_code_until_accepted(
+            _ask_code,
+            _submit_new,
+            what="【第1次·改成新密码】输入手机收到的重置验证码",
+        )
+        if status != "ok":
+            pytest.skip("人工放弃（验证码已发出，密码尚未修改）")
         logout(ready_pid)
         login_with_password_value(ready_pid, user, new_password)
         assert logged_in(ready_pid), "新密码登录后仍未进入已登录态，重置可能没生效"
     finally:
-        # 第二程 NEW -> OLD 还原（幂等开页，不管上一程把窗口留在什么状态）
-        logout(ready_pid)
-        open_forgot_password_page(ready_pid)
-        request_forgot_sms(ready_pid, user)
-        code2 = _ask_code("【第2次·还原原密码】输入手机收到的重置验证码（回车放弃还原）: ")
-        if not code2:
-            raise AssertionError(
-                "还原中断：账户可能停在【新密码】，请用 HALL_TEST_NEW_PASSWORD 登录后手动改回原密码！"
+        # 人放弃（一次都没提交）时密码没动，**不必**白折腾一趟还原程 ——
+        # 那还要人再输一个码，而这时账户本来就是原样。
+        if submitted:
+            # 第二程 NEW -> OLD 还原（幂等开页，不管上一程把窗口留在什么状态）
+            logout(ready_pid)
+            open_forgot_password_page(ready_pid)
+            request_forgot_sms(ready_pid, user)
+            status2, _ = ask_code_until_accepted(
+                _ask_code,
+                lambda code: submit_forgot_reset(ready_pid, code, old_password),
+                what="【第2次·还原原密码】输入手机收到的重置验证码",
             )
-        submit_forgot_reset(ready_pid, code2, old_password)
-        logout(ready_pid)
-        login_with_password_value(ready_pid, user, old_password)
-        assert logged_in(ready_pid), "原密码登录后仍未进入已登录态，还原可能没生效"
+            if status2 != "ok":
+                raise AssertionError(
+                    "还原中断：账户可能停在【新密码】，请用 HALL_TEST_NEW_PASSWORD 登录后手动改回原密码！"
+                )
+            logout(ready_pid)
+            login_with_password_value(ready_pid, user, old_password)
+            assert logged_in(ready_pid), "原密码登录后仍未进入已登录态，还原可能没生效"

@@ -1,13 +1,17 @@
 """锁「人在环」的交互便利设施。
 
-两件事：
+三件事：
 1. `hall_auto.console.focus_console()` —— 点完「发送验证码」把终端抢到前台，
    人不用手动 Alt+Tab。**它只是便利，绝不能成为用例的前置条件或断言的一部分。**
 2. 人在环用例里**只许通过 `_ask_code()` 读 stdin** —— 那一处负责"先切窗口再问人"。
+3. 重输验证码时**只许重问、不许重发码**（2026-09-28 加）。
 
 为什么要专门锁第 2 条（2026-09-22 用户明确要求「点完发送验证码自动跳到终端」）：
 散着写 4 处 `input()` 的话，下次加第 5 个码就会漏掉切窗口，
 而漏了**不报错**，只是人得自己 Alt+Tab —— 这类"静默降级"最不容易被发现。
+
+第 3 条同理：把发码塞进重试里，功能看着正常（重输能过），
+只是每次都多发一条短信，静默地把测试号发到限流。
 """
 
 from __future__ import annotations
@@ -23,6 +27,17 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANUAL_TESTS = REPO_ROOT / "tests" / "launch" / "test_p1_login.py"
+LOGIN_MODULE = REPO_ROOT / "hall_auto" / "login.py"
+
+# 「发码」这一类调用。重试循环里只要出现一个，就意味着**每次重输都会再发一次码**：
+# 短信撞服务端限流（见 `request_forgot_sms` 的注释）、邮件要人再翻一次邮箱。
+# 重试的全部价值就在"码不重发"，所以这两条守卫盯的就是它。
+SEND_CODE_CALLS = (
+    "request_sms_code",
+    "request_forgot_sms",
+    "microsoft_send_code",
+    "fill_bind_phone",
+)
 
 
 # ---------- focus_console：拿不到窗口是常态，绝不能抛 ----------
@@ -116,3 +131,90 @@ def test_ask_code_focuses_the_terminal_before_reading():
     input_lines = [c.lineno for c in _calls(helper, "input")]
     assert focus_lines and input_lines
     assert min(focus_lines) < min(input_lines), "_ask_code 里 focus_console 没有排在 input 前面"
+
+
+# ---------- 人在环重输：只许重问，不许重发码 ----------
+#
+# 2026-09-28：验证码输错了原来只能重跑整条（会重新发码）。改成"原地重输"之后，
+# 最容易被后人写坏的地方就是**把发码塞进重试里** —— 那样功能看着正常
+# （重输能过），只是每次都多发一条短信，静默地把测试号发到超限。
+# 所以这里用静态检查把它钉住，而不是靠人记得。
+
+
+def _login_tree() -> ast.Module:
+    return ast.parse(LOGIN_MODULE.read_text(encoding="utf-8"))
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    """子树里出现过的被调用函数名（`f(...)` 的 `f`，含 `a.f(...)` 的 `f`）。"""
+    out: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            name = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None)
+            if name:
+                out.add(name)
+    return out
+
+
+def _function_defs(tree: ast.Module) -> dict[str, list[ast.FunctionDef]]:
+    """模块内所有函数（含嵌套）按名字索引 —— 为了把 `_submit_ms_code` 这种
+    "先定义、再把名字当回调传进去"的写法也解析到函数体。"""
+    out: dict[str, list[ast.FunctionDef]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            out.setdefault(node.name, []).append(node)
+    return out
+
+
+@pytest.mark.unit
+def test_retry_helper_itself_never_sends_a_code():
+    """**关键保护**：`ask_code_until_accepted` 里不许有任何"发码"调用。
+
+    它的契约就是「只重问、不重发」。在它里面补一个发送，等于每次重输都再发一次码。
+    """
+    helper = next(
+        (
+            n
+            for n in ast.walk(_login_tree())
+            if isinstance(n, ast.FunctionDef) and n.name == "ask_code_until_accepted"
+        ),
+        None,
+    )
+    assert helper is not None, "`ask_code_until_accepted` 不见了 —— 重输机制整个没了"
+    bad = _called_names(helper) & set(SEND_CODE_CALLS)
+    assert not bad, f"重试循环里出现了发码调用：{sorted(bad)}"
+
+
+@pytest.mark.unit
+def test_manual_retry_callbacks_never_send_a_code():
+    """**关键保护**：人在环用例传给重试循环的 submit 回调里，不许有"发码"调用。
+
+    这是上一条守不住的地方：发码被塞进 `lambda code: ...` 或
+    `def _submit_ms_code(...)` 里时，`ask_code_until_accepted` 自己看不见，
+    但每重输一次就会再发一次码。
+    """
+    tree = _manual_tree()
+    defs = _function_defs(tree)
+    retries = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "ask_code_until_accepted"
+    ]
+    assert retries, "测试里一处 ask_code_until_accepted 都没用上 —— 人在环重输没接上"
+
+    offenders: list[str] = []
+    for call in retries:
+        if len(call.args) < 2:
+            offenders.append(f"第 {call.lineno} 行：调用没给 submit 回调")
+            continue
+        submit = call.args[1]
+        targets: list[ast.AST] = [submit]
+        if isinstance(submit, ast.Name):
+            targets += defs.get(submit.id, [])
+        names: set[str] = set()
+        for target in targets:
+            names |= _called_names(target)
+        bad = names & set(SEND_CODE_CALLS)
+        if bad:
+            offenders.append(f"第 {call.lineno} 行：{sorted(bad)}")
+    assert not offenders, f"重试回调里在发码，每次重输都会重发一次：{offenders}"

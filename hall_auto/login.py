@@ -28,6 +28,74 @@ MICROSOFT_OTP_SEND_TIMEOUT_SEC = 15  # 「我们向 <邮箱> 发送登录代码�
 MICROSOFT_OTP_PAGE_TIMEOUT_SEC = 30  # 点【发送验证码】后代码输入框出现（微软发信有网络往返）
 MICROSOFT_OTP_SUBMIT_TIMEOUT_SEC = 12  # 填完码后提交按钮变可点（页面校验 + 重渲染，别抓一次快照就下结论）
 
+# --- 人在环收码：输错了要能在原地重输，不能整条重跑 -------------------------
+#
+# 2026-09-28 用户提出：验证码是人手输的，打错一位很常见。原来的实现一旦码错，
+# 整条用例直接 fail，想再试**只能重跑** —— 而重跑会重新发一次码。
+# 短信/邮件都有服务端限流（见 `request_forgot_sms` 的注释），
+# 最坏把测试号发到超限、当天都跑不了；邮件那条还要人再翻一次邮箱。
+#
+# 所以把「提交后没成功」拆成两类：
+#   · `CodeRejected` —— **页面还停在输入态**，最可能是码错/过期 → 值得重问人一次；
+#   · 其它 `LaunchError` —— 控件找不到、窗口被遮挡、按钮点不动 → 重问多少次都一样。
+# 只有前者重试，后者立刻冒泡，免得白耗人在场的时间。
+
+CODE_MAX_ATTEMPTS = 3  # 同一个码最多重输几次。别调大：连错多次可能触发服务端锁定
+
+
+class CodeRejected(LaunchError):
+    """提交的验证码没被接受，但**页面还停在输入态** —— 最可能是码错或已过期。
+
+    单独一个类型是为了让调用方区分「还能再试一次」和「真挂了」：
+    前者重问人即可（**不必重发码**），后者重问多少次也一样。
+
+    注意它**继承 `LaunchError`**：没人接住时行为和原来完全一致（用例 fail），
+    所以这个改动不会让任何一条老路径"变绿"。
+    """
+
+
+def _code_prompt(what: str, attempt: int, max_attempts: int) -> str:
+    """提示语。第 1 次不写"第 N 次"—— 免得没重试过的人以为前面已经输过。"""
+    if attempt == 1:
+        return f"{what}（直接回车放弃）: "
+    return f"{what}｜第 {attempt}/{max_attempts} 次重输（直接回车放弃）: "
+
+
+def ask_code_until_accepted(
+    ask_code,
+    submit,
+    *,
+    what: str,
+    max_attempts: int = CODE_MAX_ATTEMPTS,
+) -> tuple[str, object]:
+    """问人要验证码 → 提交；被拒（`CodeRejected`）就再问一次，**不重发码**。
+
+    返回 `("ok", submit 的返回值)`；人直接回车放弃时返回 `("abandoned", None)`。
+    试满 `max_attempts` 仍被拒，把最后一次的 `CodeRejected` 原样抛出去。
+
+    `ask_code` 是**回调**（测试里传 `_ask_code`）—— 全项目只有那一处 `input()`，
+    它负责"先把终端提到前台再问人"。散着写会漏掉切窗口而且**不报错**
+    （守卫：`tests/unit/test_manual_loop_policy.py`）。
+    """
+    attempt = 1
+    while True:
+        code = ask_code(_code_prompt(what, attempt, max_attempts))
+        if not code:
+            return "abandoned", None
+        try:
+            return "ok", submit(code)
+        except CodeRejected as exc:
+            print(f"\n⚠️ 验证码没被接受：{exc}")
+            if attempt >= max_attempts:
+                raise
+            attempt += 1
+            print(
+                f"   还有 {max_attempts - attempt + 1} 次机会："
+                "码没过期的话**重新输一次即可**（不会重发码，也不会重跑整条流程）。\n"
+                "   若确认码已过期或压根没收到，直接回车放弃，再重跑本条用例（那会重新发码）。"
+            )
+
+
 # 「邮箱验证码页」的文本特征。**这一页必须排在 account_picker 之前判** ——
 # 它的正文是「我们向 <邮箱> 发送登录代码。」，**含邮箱**（真值走 HALL_MS_USER，不落盘），
 # 会被 `email in name` 那条误判成「账号选择器」：脚本去点一块纯文本（点不动），
@@ -283,7 +351,14 @@ def login_with_sms_code(pid: int, code: str) -> str:
         if logged_in(pid):
             return popup_text(_by_aid(pid, "Button", "UserInfoPart").element_info.name)
         time.sleep(0.5)
-    raise LaunchError("登录：提交验证码后未进入已登录态")
+    # 没进已登录态。分两种：验证码框还在 = 提交被拒、页面没走（最可能码错/过期），
+    # 人重输一次即可；框都没了 = 页面状态已经变了，重输没意义，直接报错。
+    if _by_aid(pid, "Edit", "CodeInput") is not None:
+        raise CodeRejected(
+            "登录：提交验证码后没进入已登录态，但验证码输入框还在 —— "
+            "大概率是码输错或已过期"
+        )
+    raise LaunchError("登录：提交验证码后未进入已登录态（且验证码框已消失，页面状态变了）")
 
 
 def open_forgot_password_page(pid: int) -> None:
@@ -376,6 +451,14 @@ def submit_forgot_reset(pid: int, code: str, new_password: str) -> dict:
         if page_closed or loggedin:
             return {"page_closed": page_closed, "logged_in": loggedin}
         time.sleep(0.5)
+    # 验证码框还在 = 页面停在原地，重填一次有机会过（码错 / 新密码不合法都走这条）；
+    # 框没了说明页面已经翻页，重填没意义。
+    if _by_aid(pid, "Edit", "CodeInput") is not None:
+        raise CodeRejected(
+            "忘记密码：提交后页面没关也没登录，但验证码框还在 —— "
+            "可能验证码错、已过期，或新密码不合法"
+            f"（page_closed={page_closed}, logged_in={loggedin}）"
+        )
     raise LaunchError(
         f"忘记密码：提交后页面没关也没登录（page_closed={page_closed}, logged_in={loggedin}），可能验证码错或新密码不合法"
     )
@@ -858,13 +941,22 @@ def microsoft_pick_account(ms_win, email: str) -> None:
         tile.click_input()
 
 
-def wait_microsoft_logged_in(pid: int) -> str:
+def wait_microsoft_logged_in(pid: int, ms_win=None) -> str:
     """SSO/提交后等回大厅已登录态，返回用户区文案。
 
     超时时**必须把「大厅是不是被挡住了」写进报错**：2026-09-23 真机这条超时 40s，
     而失败截图里大厅一个像素都没露（微信在前台）。大厅主内容区是 WebView2，
     被遮挡时 Chromium 暂停渲染 —— 登录页永远提交不出去，而 Win32 控件照样读得到。
     人得逐张看截图才能定性，所以这里直接给出「谁挡着」。
+
+    **传了 `ms_win` 才判"是不是码被拒"**（2026-09-28 加，给人在环重输用）：
+
+      · 有窗口挡着 → 环境问题，抛 `LaunchError`。**不能算码错** ——
+        那种情况下重输多少次都一样，只会白耗人的时间；
+      · 没遮挡、但 OTP 输入框还在 → 页面停在原地，最可能是码错/过期 → `CodeRejected`；
+      · 其它 → 保持原来的 `LaunchError`。
+
+    无人值守那条（`test_microsoft_login_sso`）不传 `ms_win`，行为一字未变。
     """
     deadline = time.time() + MICROSOFT_SSO_TIMEOUT_SEC
     while time.time() < deadline:
@@ -873,6 +965,11 @@ def wait_microsoft_logged_in(pid: int) -> str:
         time.sleep(0.5)
     hint = occlusion_hint(pid)
     detail = hint or f"窗口诊断未发现问题。{window_state_facts(pid)}"
+    if ms_win is not None and not hint and microsoft_code_input(ms_win) is not None:
+        raise CodeRejected(
+            "微软登录：提交的登录代码没被接受，OTP 输入框还在 —— 大概率是码输错或已过期\n"
+            f"  ⚠️ {detail}"
+        )
     raise LaunchError(f"微软登录：提交后未进入已登录态\n  ⚠️ {detail}")
 
 
@@ -1164,10 +1261,12 @@ def submit_bind_code(scope, code: str) -> None:
             return
         time.sleep(0.5)
 
+    # 弹窗还在 = 提交没被接受。**归为可重试**：码错值得重填一次，
+    # "确定按钮没点生效"也值得重点一次，两种都落在这里。
     dumped = dump_bind_tree(pid, "点了确定但绑定弹窗没消失")
-    raise LaunchError(
+    raise CodeRejected(
         "绑定手机号：点了确定，但弹窗没消失"
-        f"（{BIND_SUBMIT_TIMEOUT_SEC}s）—— 验证码可能不对，或按钮没点生效"
+        f"（{BIND_SUBMIT_TIMEOUT_SEC}s）—— 验证码可能不对，或确定按钮没点生效"
         + (f"，控件树已落盘：{dumped}" if dumped else "")
     )
 
@@ -1224,6 +1323,10 @@ def handle_bind_phone_popup(pid: int, phone: str, ask_code, timeout_sec: float =
       `"bound"`   —— 绑好了。
       `"skipped"` —— 弹了但没绑成：没配手机号，或人回车放弃了。
 
+    **验证码输错不会直接判死**：`submit_bind_code` 被拒会抛 `CodeRejected`，
+    这里交给 `ask_code_until_accepted` 在原地重问人（不重发码），
+    人也可以随时回车放弃 → `"skipped"`。
+
     `ask_code` 是**回调**（测试里传 `_ask_code`），这里不 `input()` ——
     全项目只有测试文件那一处读 stdin，那一处负责「先切窗口再问人」，
     散着写会漏掉切窗口而且**不报错**（守卫：`tests/unit/test_manual_loop_policy.py`）。
@@ -1244,12 +1347,15 @@ def handle_bind_phone_popup(pid: int, phone: str, ask_code, timeout_sec: float =
 
     try:
         fill_bind_phone(scope, phone)
-        code = ask_code(f"已向 {phone} 发送绑定验证码。输入手机收到的验证码（直接回车放弃绑定）: ")
-        if not code:
+        status, _ = ask_code_until_accepted(
+            ask_code,
+            lambda code: submit_bind_code(scope, code),
+            what=f"已向 {phone} 发送绑定验证码。输入手机收到的验证码",
+        )
+        if status != "ok":
             close_bind_dialog(scope)
             print("⚠️ 人工放弃绑定手机号（验证码已发出），已关掉弹窗。")
             return "skipped"
-        submit_bind_code(scope, code)
         return "bound"
     except Exception:
         # 任何一步挂了都要把弹窗收掉 —— 否则后面每条用例都点不动。

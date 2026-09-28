@@ -473,3 +473,252 @@ def test_logout_still_returns_early_when_already_logged_out():
     ):
         login.logout(1)
     assert pressed == []
+
+
+# ---------------------------------------------------------------------------
+# 人在环收码：输错了在**原地重输**，不重发码、不重跑整条
+#
+# 2026-09-28 用户提出：验证码是人手输的，打错一位很常见。原来错一次整条用例
+# 直接 fail，想再试只能重跑 —— 而重跑会**重新发一次码**：短信有服务端限流
+# （见 `request_forgot_sms` 的注释），邮件要人再翻一次邮箱。
+#
+# 拆分口径：`CodeRejected` = 页面还停在输入态、最可能码错 → 值得重问；
+# 其它 `LaunchError` = 控件找不到/窗口被遮挡/按钮点不动 → 重问多少次都一样。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_code_rejected_is_still_a_launch_error():
+    """**关键保护**：`CodeRejected` 必须继承 `LaunchError`。
+
+    没人接住时（无人值守那几条、以后新加的用例）行为和改动前**完全一致** —— 用例 fail。
+    所以这次改动不会让任何一条老路径"变绿"。
+    """
+    assert issubclass(login.CodeRejected, login.LaunchError)
+
+
+@pytest.mark.unit
+def test_ask_code_until_accepted_returns_immediately_when_the_first_code_works():
+    """第一次就过：只问一次、只提交一次，提示语里不该出现「第 N 次」。"""
+    asked: list[str] = []
+    status, value = login.ask_code_until_accepted(
+        lambda prompt: asked.append(prompt) or "123456",
+        lambda code: f"ok-{code}",
+        what="输入验证码",
+    )
+    assert (status, value) == ("ok", "ok-123456")
+    assert len(asked) == 1, f"成功了还多问：{asked}"
+    assert "第" not in asked[0], f"第一次的提示语不该写「第 N 次」：{asked[0]}"
+
+
+@pytest.mark.unit
+def test_ask_code_until_accepted_reasks_after_a_rejection():
+    """**核心行为**：码被拒（`CodeRejected`）就再问一次，第二次过就算过。"""
+    asked: list[str] = []
+    submitted: list[str] = []
+
+    def _ask(prompt: str) -> str:
+        asked.append(prompt)
+        return f"code{len(asked)}"
+
+    def _submit(code: str) -> str:
+        submitted.append(code)
+        if code == "code1":
+            raise login.CodeRejected("码不对")
+        return "已登录用户"
+
+    status, value = login.ask_code_until_accepted(_ask, _submit, what="输入验证码")
+    assert (status, value) == ("ok", "已登录用户")
+    assert submitted == ["code1", "code2"], f"提交序列不对：{submitted}"
+    assert len(asked) == 2
+    assert "第 2/" in asked[1], f"重问时要告诉人是第几次：{asked[1]}"
+
+
+@pytest.mark.unit
+def test_ask_code_until_accepted_gives_up_after_max_attempts():
+    """**关键保护**：试满就抛最后一次的 `CodeRejected`，不能无限重问。
+
+    上限存在的理由：连错多次可能触发服务端锁定，一直问下去只会把号玩死。
+    """
+    asked: list[str] = []
+
+    def _submit(_code: str) -> str:
+        raise login.CodeRejected("码不对")
+
+    with pytest.raises(login.CodeRejected):
+        login.ask_code_until_accepted(
+            lambda prompt: asked.append(prompt) or "000000",
+            _submit,
+            what="输入验证码",
+            max_attempts=3,
+        )
+    assert len(asked) == 3, f"问了 {len(asked)} 次，应该正好 3 次"
+
+
+@pytest.mark.unit
+def test_ask_code_until_accepted_does_not_submit_when_the_human_presses_enter():
+    """人回车放弃 → **一次都不提交**（提交空码会真去校验一次，还可能记一次错）。"""
+    submitted: list[str] = []
+    status, value = login.ask_code_until_accepted(
+        lambda _p: "", lambda c: submitted.append(c), what="输入验证码"
+    )
+    assert (status, value) == ("abandoned", None)
+    assert submitted == [], f"人放弃了还提交：{submitted}"
+
+
+@pytest.mark.unit
+def test_ask_code_until_accepted_does_not_retry_on_a_real_failure():
+    """**关键保护**：只有 `CodeRejected` 才重试。
+
+    其它 `LaunchError`（控件找不到、窗口被遮挡、按钮点不动）重问多少次都一样，
+    重试只会白耗人在场的时间，还让人以为是自己输错了。
+    """
+    asked: list[str] = []
+
+    def _submit(_code: str) -> str:
+        raise login.LaunchError("登录：点不到登录按钮")
+
+    with pytest.raises(login.LaunchError) as exc:
+        login.ask_code_until_accepted(
+            lambda prompt: asked.append(prompt) or "123456", _submit, what="输入验证码"
+        )
+    assert type(exc.value) is login.LaunchError, "硬失败被包成了 CodeRejected"
+    assert len(asked) == 1, f"硬失败还重问：{asked}"
+
+
+# ---------- 短信登录：超时后按"页面还在不在"分流 ----------
+
+
+def _sms_login_raises(second_by_aid, *, timeout: int = 0):
+    """跑一次 `login_with_sms_code`，返回它抛的异常。
+
+    `second_by_aid` 是**超时后**那次 `_by_aid` 的返回值（找验证码框）：
+    给对象 = 框还在，给 None = 页面已经翻走了。
+    """
+    box = mock.Mock()
+    with (
+        mock.patch.object(login, "_by_aid", side_effect=[box, second_by_aid]),
+        mock.patch.object(login, "_by_name", return_value=box),
+        mock.patch.object(login, "_press_button", return_value=True),
+        mock.patch.object(login, "logged_in", return_value=False),
+        mock.patch.object(login.time, "sleep"),
+        mock.patch.object(login, "LOGIN_SUBMIT_TIMEOUT_SEC", timeout),
+    ):
+        with pytest.raises(login.LaunchError) as exc:
+            login.login_with_sms_code(1, "123456")
+    return exc.value
+
+
+@pytest.mark.unit
+def test_sms_login_calls_it_rejected_while_the_code_box_is_still_there():
+    """超时后验证码框还在 = 码被拒（可重试），不是"登录功能坏了"。"""
+    exc = _sms_login_raises(mock.Mock())
+    assert type(exc) is login.CodeRejected, f"应该是可重试的 CodeRejected，实际 {type(exc)}"
+
+
+@pytest.mark.unit
+def test_sms_login_is_a_hard_failure_when_the_page_moved_on():
+    """验证码框消失 = 页面状态已经变了，重输没意义 → 普通 `LaunchError`（不重试）。"""
+    exc = _sms_login_raises(None)
+    assert type(exc) is login.LaunchError, f"页面都翻页了还判成码错：{type(exc)}"
+
+
+# ---------- 微软：只有"没遮挡 + OTP 框还在"才算码错 ----------
+
+
+def _ms_wait_raises(*, hint: str, otp_present: bool, ms_win=object()):
+    """跑一次 `wait_microsoft_logged_in`，返回它抛的异常。"""
+    with (
+        mock.patch.object(login, "logged_in", return_value=False),
+        mock.patch.object(login.time, "sleep"),
+        mock.patch.object(login, "occlusion_hint", return_value=hint),
+        mock.patch.object(login, "window_state_facts", return_value="窗口诊断"),
+        mock.patch.object(
+            login, "microsoft_code_input", return_value=mock.Mock() if otp_present else None
+        ),
+        mock.patch.object(login, "MICROSOFT_SSO_TIMEOUT_SEC", 0),
+    ):
+        with pytest.raises(login.LaunchError) as exc:
+            if ms_win is None:
+                login.wait_microsoft_logged_in(1)
+            else:
+                login.wait_microsoft_logged_in(1, ms_win)
+    return exc.value
+
+
+@pytest.mark.unit
+def test_microsoft_login_rejects_the_code_when_nothing_is_in_the_way():
+    """OTP 框还在 + **没有窗口遮挡** → 判码错（可重试）。"""
+    exc = _ms_wait_raises(hint="", otp_present=True)
+    assert type(exc) is login.CodeRejected, f"应该是可重试的 CodeRejected，实际 {type(exc)}"
+
+
+@pytest.mark.unit
+def test_microsoft_login_does_not_blame_the_code_when_the_window_is_covered():
+    """**关键保护**：有窗口挡着时**绝不能**判成"码错"。
+
+    WebView2 被遮挡就不渲染、登录页永远提交不出去（2026-09-23 真机那条超时 40s
+    的真因），而这时候 OTP 框也还在。判成码错会让人反复重输 —— 问题根本不在码上。
+    """
+    exc = _ms_wait_raises(hint="大厅被 wechat.exe 遮挡", otp_present=True)
+    assert type(exc) is login.LaunchError, f"遮挡被当成了码错：{type(exc)}"
+    assert "wechat" in str(exc), "遮挡诊断要留在报错里"
+
+
+@pytest.mark.unit
+def test_microsoft_login_without_a_window_handle_keeps_the_old_behaviour():
+    """不传 `ms_win`（无人值守那条）行为一字未变：只抛普通 `LaunchError`。"""
+    exc = _ms_wait_raises(hint="", otp_present=True, ms_win=None)
+    assert type(exc) is login.LaunchError
+
+
+# ---------- 绑定弹窗：重试时不许把弹窗关掉 ----------
+
+
+@pytest.mark.unit
+def test_bind_popup_reasks_without_closing_the_dialog_when_the_code_is_rejected():
+    """**关键保护**：码被拒时**不许关弹窗** —— 关了就没法原地重输，只能重跑（重发码）。
+
+    这条守的是"重试"和"收尾"的边界：`handle_bind_phone_popup` 的 `except Exception`
+    会关弹窗，`CodeRejected` 必须**在它之前**被重试逻辑消化掉。
+    """
+    asked: list[str] = []
+    closed: list[bool] = []
+    tries: list[str] = []
+
+    def _ask(prompt: str) -> str:
+        asked.append(prompt)
+        return f"code{len(asked)}"
+
+    def _submit(_scope, code: str) -> None:
+        tries.append(code)
+        if code == "code1":
+            raise login.CodeRejected("码不对")
+
+    with (
+        mock.patch.object(login, "find_bind_dialog", return_value=object()),
+        mock.patch.object(login, "fill_bind_phone", lambda _s, _p: None),
+        mock.patch.object(login, "submit_bind_code", _submit),
+        mock.patch.object(login, "close_bind_dialog", lambda _s: closed.append(True) or True),
+    ):
+        status = login.handle_bind_phone_popup(1, "13800000000", _ask)
+    assert status == "bound"
+    assert tries == ["code1", "code2"], f"没重试：{tries}"
+    assert closed == [], "码被拒时不能关弹窗，否则没法原地重输"
+
+
+@pytest.mark.unit
+def test_bind_popup_closes_the_dialog_when_the_code_keeps_being_rejected():
+    """试满仍被拒 → 异常照抛，但**弹窗必须收掉**（模态窗留着会卡住后面每条用例）。"""
+    closed: list[bool] = []
+    with (
+        mock.patch.object(login, "find_bind_dialog", return_value=object()),
+        mock.patch.object(login, "fill_bind_phone", lambda _s, _p: None),
+        mock.patch.object(
+            login, "submit_bind_code", lambda _s, _c: (_ for _ in ()).throw(login.CodeRejected("码不对"))
+        ),
+        mock.patch.object(login, "close_bind_dialog", lambda _s: closed.append(True) or True),
+    ):
+        with pytest.raises(login.CodeRejected):
+            login.handle_bind_phone_popup(1, "13800000000", lambda _p: "123456")
+    assert closed, "重试耗尽后必须把模态弹窗收掉"
