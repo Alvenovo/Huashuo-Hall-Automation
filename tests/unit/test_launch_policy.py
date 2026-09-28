@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,8 +8,6 @@ import pytest
 import hall_auto.launch as launch
 from hall_auto.launch import (
     Overlay,
-    dismiss_whitelist_popups,
-    is_loading,
     is_unknown,
     is_whitelisted,
     matches_button,
@@ -68,66 +65,75 @@ def test_matches_button(aid, name, labels, expected):
     assert matches_button(aid, name, labels) is expected
 
 
-# --------------------------------------------------- 加载态过渡窗（2026-09-28）
+@pytest.mark.unit
+def test_is_unknown_only_spares_whitelisted_and_first_run():
+    """只有白名单弹窗和首跑协议窗可以「不是未知弹窗」。
+
+    这条**同时是「这个函数真的跑得起来」的守卫** —— 2026-09-28 实付：
+    重构时把 `is_loading` 删掉了，但 `is_unknown` 里还留着对它的调用，
+    而**单测全绿**（当时没有任何用例调用 `is_unknown`，`NameError` 要等真跑才炸，
+    端到端一跑就炸）。**没被调用过的函数 = 没被验过的函数。**
+    """
+    settings = load_config().launch
+    assert not is_unknown(Overlay(name="更新对话框", node=None), settings)
+    assert is_unknown(Overlay(name="致命错误", node=None), settings)
+    assert not is_unknown(Overlay(name="随便什么", node=None, first_run=True), settings)
 
 
-class _SpyNode:
-    """假节点：只记「有没有人去它的子树里翻按钮」。"""
+# ------------------------------ 未知弹窗必须报出「它说了什么」，不是「它叫什么」（2026-09-28）
 
-    def __init__(self) -> None:
-        self.subtree_scans = 0
+
+class _FakeInfo:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeChild:
+    def __init__(self, name: str) -> None:
+        self.element_info = _FakeInfo(name)
+
+
+class _FakeNode:
+    def __init__(self, *names: str) -> None:
+        self._names = names
 
     def descendants(self, **_kwargs):
-        self.subtree_scans += 1
-        return []
+        return [_FakeChild(n) for n in self._names]
+
+
+class _BoomNode:
+    def descendants(self, **_kwargs):
+        raise RuntimeError("UIA 挂了")
 
 
 @pytest.mark.unit
-def test_loading_splash_is_neither_dismissed_nor_fatal():
-    """`Splash` 是**加载态**，不是未知弹窗 —— 点不得，也判不得死。
+def test_overlay_text_reports_what_the_dialog_says():
+    """报错必须带上弹窗**文字** —— 名字说明不了任何事。
 
-    2026-09-28 实付：大厅加载时会弹一个 20×20、屏幕正中的顶层窗叫 `Splash`。
-    把它当未知弹窗判死，报出的 `未知弹窗: ['Splash']` 会把排查方向带到
-    「去找这个弹窗」，而真因是页面压根没加载出来（窗口被遮挡，坑 15）。
+    2026-09-28 实付：`wait_until_ready` 只报 `未知弹窗: ['Splash']`。
+    名字 `Splash` 毫无信息量，而框里写的是一句决定性的话
+    「检测到您的电脑缺少程序运行必需组件或组件版本低，请按提示安装」。
+    真因就写在框里，报错却把它丢了 —— 于是有人去猜 `Splash` 是什么，
+    还差点把它当加载态**放行**掉（= 把这个环境错误静默吞掉）。
     """
-    settings = load_config().launch
-    assert is_loading("Splash", settings)
-    assert not is_unknown(Overlay(name="Splash", node=None), settings)
-    # 反例：加载态不等于「什么都放行」
-    assert not is_loading("致命错误", settings)
-    assert is_unknown(Overlay(name="致命错误", node=None), settings)
-    assert not is_loading("", settings)
+    node = _FakeNode("确定", "检测到您的电脑缺少程序运行必需组件或组件版本低，请按提示安装", "关闭")
+    text = launch._overlay_text(node)
+    assert "缺少程序运行必需组件" in text
+    assert "确定" in text and "关闭" in text
 
 
 @pytest.mark.unit
-def test_loading_popup_is_never_clicked_even_if_someone_whitelists_it():
-    """加载态**优先于白名单** —— 就算有人把 `Splash` 加进白名单，也不许去点它。
-
-    ⚠️ 只拿**当前**配置测这条是**假守卫**：`Splash` 本来就不在白名单里，
-    把 `continue` 删掉它也照样绿（2026-09-28 注入实付：删了只红 2 条，这条没红）。
-    真正会被踩的是「有人图省事把 `Splash` 塞进 `popup_whitelist_keywords`」——
-    那时没有这条 `continue`，大厅就会开始往一个 20×20 的加载窗上点「同意 / 确定」。
-    """
-    base = load_config().launch
-    settings = replace(
-        base, popup_whitelist_keywords=(*base.popup_whitelist_keywords, "Splash")
-    )
-    assert is_whitelisted("Splash", settings), "前提不成立：这个假配置里 Splash 得是白名单"
-    spy = _SpyNode()
-    dismiss_whitelist_popups([Overlay(name="Splash", node=spy)], settings)
-    assert spy.subtree_scans == 0, "Splash 被当成可点弹窗去点了"
+def test_overlay_text_dedupes_and_truncates():
+    node = _FakeNode("关闭", "关闭", "", "  ", "很长" * 200)
+    text = launch._overlay_text(node, limit=20)
+    assert text.count("关闭") == 1, "重复文字应去重"
+    assert len(text) <= 21 and text.endswith("…"), f"超长应截断：{text!r}"
 
 
 @pytest.mark.unit
-def test_whitelisted_popup_is_still_clicked():
-    """负路径的反面：白名单弹窗**照旧**要去点。
-
-    没有这条，把 `continue` 写在白名单判断之前（或直接 `return`）也照样"绿"。
-    """
-    settings = load_config().launch
-    spy = _SpyNode()
-    dismiss_whitelist_popups([Overlay(name="更新对话框", node=spy)], settings)
-    assert spy.subtree_scans >= 1, "白名单弹窗反而没去点"
+def test_overlay_text_never_raises_when_uia_is_broken():
+    """抠文字失败**不许把就绪检查搞崩** —— 那会让真因更看不见。"""
+    assert launch._overlay_text(_BoomNode()) == ""
 
 
 @pytest.mark.unit
@@ -135,6 +141,11 @@ def test_with_hint_appends_the_hint():
     assert launch._with_hint("未知弹窗: ['Splash']", "大厅被别的窗口挡住了：「X」") == (
         "未知弹窗: ['Splash']｜遮挡诊断：大厅被别的窗口挡住了：「X」"
     )
+
+
+@pytest.mark.unit
+def test_with_hint_leaves_message_alone_when_hint_is_empty():
+    assert launch._with_hint("超时未就绪 missing=[]", "") == "超时未就绪 missing=[]"
 
 
 @pytest.mark.unit
@@ -151,9 +162,7 @@ def test_occlusion_note_is_empty_without_a_pid(monkeypatch, pid):
     assert calls == [], "没有 pid 时不该去扫遮挡"
 
 
-@pytest.mark.unit
-def test_with_hint_leaves_message_alone_when_hint_is_empty():
-    assert launch._with_hint("超时未就绪 missing=[]", "") == "超时未就绪 missing=[]"
+# ------------------------------------------------------------- 结构守卫（AST）
 
 
 def _func(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -161,6 +170,21 @@ def _func(tree: ast.Module, name: str) -> ast.FunctionDef:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     raise AssertionError(f"hall_auto/launch.py 里找不到函数 {name}")
+
+
+def _ready_func() -> ast.FunctionDef:
+    return _func(ast.parse(LAUNCH_MODULE.read_text(encoding="utf-8")), "wait_until_ready")
+
+
+def _launch_error_messages() -> list[str]:
+    """`wait_until_ready` 里每条 `raise LaunchError(...)` 的消息表达式（源码形式）。"""
+    messages = []
+    for node in ast.walk(_ready_func()):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            exc = node.exc
+            if isinstance(exc.func, ast.Name) and exc.func.id == "LaunchError":
+                messages.append(ast.unparse(exc.args[0]))
+    return messages
 
 
 def _call_lines(func: ast.FunctionDef, name: str) -> list[int]:
@@ -171,6 +195,15 @@ def _call_lines(func: ast.FunctionDef, name: str) -> list[int]:
     )
 
 
+def _assign_source(func: ast.FunctionDef, varname: str) -> str | None:
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == varname:
+                    return ast.unparse(node.value)
+    return None
+
+
 @pytest.mark.unit
 def test_ready_failures_all_carry_the_occlusion_diagnosis():
     """就绪检查的**每条**失败出口都必须带遮挡诊断 —— 只给结论、不给依据是不行的。
@@ -178,19 +211,7 @@ def test_ready_failures_all_carry_the_occlusion_diagnosis():
     这条是结构守卫：`wait_until_ready` 里 `raise LaunchError(...)` 的条数被钉死，
     新增出口忘了包 `_with_hint` 会立刻变红。
     """
-    func = _func(ast.parse(LAUNCH_MODULE.read_text(encoding="utf-8")), "wait_until_ready")
-    messages = []
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Raise):
-            continue
-        exc = node.exc
-        if not (
-            isinstance(exc, ast.Call)
-            and isinstance(exc.func, ast.Name)
-            and exc.func.id == "LaunchError"
-        ):
-            continue
-        messages.append(ast.unparse(exc.args[0]))
+    messages = _launch_error_messages()
     assert len(messages) == 2, (
         f"wait_until_ready 的 LaunchError 出口数变了（{len(messages)}）——"
         "新增/删改出口时请同步这条守卫，并确认每条都带了遮挡诊断"
@@ -200,15 +221,41 @@ def test_ready_failures_all_carry_the_occlusion_diagnosis():
 
 
 @pytest.mark.unit
+def test_unknown_popup_message_carries_the_dialog_text():
+    """结构守卫：「未知弹窗」那条出口的消息，必须是由 `_overlay_text` 拼出来的。
+
+    没有这条，把 `_overlay_text` 摘掉也照样绿 —— 而那正是 09-28 的原始缺陷
+    （报「Splash」而不报框里那句「缺少程序运行必需组件」）。
+
+    ⚠️ 只查「消息里有 `_overlay_text(`」是**假守卫**：真实写法是
+    `detail = ..._overlay_text(...)...` 然后 `f"未知弹窗: {detail}"`。
+    所以这里**追一层**：把消息里用到的变量找出来，看它各自的赋值里有没有它。
+    """
+    func = _ready_func()
+    messages = [m for m in _launch_error_messages() if "未知弹窗" in m]
+    assert len(messages) == 1, f"「未知弹窗」出口应当只有一条，实际 {len(messages)} 条"
+    used = {
+        node.id
+        for node in ast.walk(ast.parse(messages[0], mode="eval"))
+        if isinstance(node, ast.Name)
+    }
+    sources = [s for s in (_assign_source(func, name) for name in used) if s]
+    assert any("_overlay_text(" in s for s in sources), (
+        "「未知弹窗」那条消息没带上弹窗文字。"
+        f"消息用到的变量={sorted(used)}，各自的来源={sources}"
+    )
+
+
+@pytest.mark.unit
 def test_occlusion_is_measured_before_the_screenshot():
     """遮挡依据必须在**截图之前**取。
 
     ⚠️ `_save_screenshot()` 会 `set_focus()` 把大厅提到前台 —— 之后再量遮挡，
     量到的是**我们自己刚造出来的**「没被挡住」，真因当场被抹掉。
-    2026-09-28 端到端实付：同一条失败，先截图那轮报「窗口可见、未被遮挡」，
-    先量再截图那轮才报出「被 WorkBuddy AI 挡住」。
+    这条不是推理，是**实验证过**的：自己铺一块非置顶窗盖住大厅，
+    截图前 `occlusion_hint` 报出遮挡者、截图后同一个函数返回空。
     """
-    func = _func(ast.parse(LAUNCH_MODULE.read_text(encoding="utf-8")), "wait_until_ready")
+    func = _ready_func()
     notes = _call_lines(func, "_occlusion_note")
     shots = _call_lines(func, "_save_screenshot")
     assert len(notes) == len(shots) == 2, (

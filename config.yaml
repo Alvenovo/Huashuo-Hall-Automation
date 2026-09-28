@@ -67,10 +67,6 @@ launch:
   update_or_card_keywords:
     - 启动卡片
     - 更新
-  # 加载态过渡窗：既不点、也不判死，等它自己消失。
-  # 实测大厅加载时会弹一个 20×20、屏幕正中的顶层窗，名字就叫 Splash。
-  loading_popup_keywords:
-    - Splash
   dismiss_buttons:
     - 关闭
     - 取消

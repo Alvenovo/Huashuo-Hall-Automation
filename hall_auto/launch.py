@@ -53,25 +53,35 @@ def prefer_dismiss(name: str, settings: LaunchSettings) -> bool:
     return any(key and key in text for key in settings.update_or_card_keywords)
 
 
-def is_loading(name: str, settings: LaunchSettings) -> bool:
-    """加载态过渡窗（实测叫 `Splash`）—— **既不该点，也不该判死**。
+def _overlay_text(node, limit: int = 160) -> str:
+    """把覆盖层子树里的**文字**抠出来 —— 报错要报出弹窗**说了什么**，不是它**叫什么**。
 
-    2026-09-28 实测（控制机）：大厅加载页面时会弹一个 **20×20、屏幕正中**的
-    顶层窗，名字就是 `Splash`。它**不是**需要人去处理的弹窗：
+    2026-09-28 实付：`wait_until_ready` 报 `未知弹窗: ['Splash']`。名字 `Splash`
+    毫无信息量，而那个框里写的是一句决定性的话：
 
-    - 点它没有意义（没有按钮），
-    - 判死更糟 —— 报出「未知弹窗: ['Splash']」会把排查方向带到「去找这个弹窗」，
-      而真因是**页面根本没加载出来**（窗口被遮挡 → WebView2 暂停渲染，坑 15）。
+        检测到您的电脑缺少程序运行必需组件或组件版本低，请按提示安装
 
-    所以这一类只等，等到 `ready_sec` 超时再失败；那时报错里带上遮挡诊断，
-    指向真因。
-
-    ⚠️ 另一处同类逻辑是 `dismiss_pre_main_popups`（等主窗口之前那圈），
-    **这次没加**：`Splash` 只在主窗口起来之后才出现，那里够不着它。
-    将来若在那边也放行白名单弹窗，记得一并看这里。
+    **真因就写在框里，报错却把它丢了** —— 于是有人（就是我）去猜「Splash 是什么」，
+    还差点把它当加载态**放行**掉，等于把这个环境错误静默吞掉。
+    **名字是壳，文字才是内容。**
     """
-    text = popup_text(name)
-    return any(key and key in text for key in settings.loading_popup_keywords)
+    texts: list[str] = []
+    seen: set[str] = set()
+    try:
+        nodes = node.descendants()
+    except Exception:
+        return ""
+    for child in nodes:
+        try:
+            name = popup_text(child.element_info.name)
+        except Exception:
+            continue
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        texts.append(name)
+    joined = " / ".join(texts)
+    return joined[:limit] + "…" if len(joined) > limit else joined
 
 
 def _save_screenshot(wrapper, stem: str) -> Path | None:
@@ -245,9 +255,6 @@ def dismiss_whitelist_popups(overlays, settings: LaunchSettings) -> None:
     for overlay in overlays:
         name = overlay.name
         first_run = overlay.first_run
-        if is_loading(name, settings):
-            # 加载态没有可点的东西；点它只会白等一轮（每轮 dismiss 里 sleep 1s）
-            continue
         if not (is_whitelisted(name, settings) or first_run):
             continue
         if prefer_dismiss(name, settings) and not first_run:
@@ -260,11 +267,7 @@ def dismiss_whitelist_popups(overlays, settings: LaunchSettings) -> None:
 
 
 def is_unknown(overlay: Overlay, settings: LaunchSettings) -> bool:
-    return not (
-        is_whitelisted(overlay.name, settings)
-        or overlay.first_run
-        or is_loading(overlay.name, settings)
-    )
+    return not (is_whitelisted(overlay.name, settings) or overlay.first_run)
 
 
 def _back_if_subpage(main) -> bool:
@@ -487,13 +490,17 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
         # 每轮只枚举一次覆盖层，白名单/未知判定复用同一份列表
         overlays = _overlay_windows(main, settings, main_handle=main_handle, pid=pid)
         dismiss_whitelist_popups(overlays, settings)
-        unknown = [o.name for o in overlays if is_unknown(o, settings)]
+        unknown = [o for o in overlays if is_unknown(o, settings)]
         if unknown:
             # 依据先取：截图会 set_focus，把大厅提到前台后就量不出遮挡了
             hint = _occlusion_note(pid)
+            # 弹窗**文字**必须带上 —— 名字（`Splash`）说明不了任何事，文字才是真因
+            detail = "；".join(
+                f"{o.name}（弹窗文字：{_overlay_text(o.node) or '读不到'}）" for o in unknown
+            )
             evidence = _save_screenshot(main, "unknown_popup")
             raise LaunchError(
-                _with_hint(f"未知弹窗: {unknown}；截图: {evidence}", hint),
+                _with_hint(f"未知弹窗: {detail}；截图: {evidence}", hint),
                 evidence=evidence,
             )
         if overlays:
