@@ -807,6 +807,27 @@ def test_forgot_sms_says_unclickable_is_not_a_rate_limit():
     assert "超限" not in str(exc), f"点不动被说成了限流：{exc}"
 
 
+@pytest.mark.unit
+def test_forgot_sms_rate_limit_message_carries_2026_09_28_findings():
+    """报错必须带上 09-28 探针实测的三条口径，别让一线拿旧猜测去处理。
+
+    实测（《运行手册》坑 12 补二）：限流是【手机号 × 业务场景】双维度 ——
+    忘记密码与短信登录是独立配额；当天到顶后恢复按【小时】计（不是"十几分钟"）；
+    换号必须是【已注册】号（未注册号在忘记密码页发不出重置码，表现和超限一样）。
+    锁这三条，防止以后又把文案改回"换一个没被限流的号 / 等十几分钟"那种误导口径。
+    """
+    _clicks, exc = _forgot_send(button_goes_away=False)
+    assert exc is not None
+    msg = str(exc)
+    assert "连点" in msg and "超限" in msg, f"报错丢了限流口径：{msg}"
+    # ① 双维度 / 独立配额：换号要换"能走忘记密码"的已注册号
+    assert "业务场景" in msg or "独立配额" in msg, f"没讲清按场景限流：{msg}"
+    assert "已注册" in msg or "未注册" in msg, f"没提醒换号需已注册：{msg}"
+    # ② 恢复按小时计，不是"十几分钟"
+    assert "小时" in msg, f"没讲清到顶后恢复按小时：{msg}"
+    assert "十几分钟" not in msg, f"又退回旧的乐观估计：{msg}"
+
+
 # ---------- 绑定弹窗：重试时不许把弹窗关掉 ----------
 
 
