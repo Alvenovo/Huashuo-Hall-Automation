@@ -172,6 +172,63 @@ def _print_concurrency_notes(suite_names: list[str]) -> None:
         print(f"  {name:16} {note}{flag}")
 
 
+def _elapsed_minutes(created_at: object) -> int | None:
+    """投出到现在的分钟数。读不出返回 None（**不许瞎猜成 0** —— 0 看起来像"刚投出去"）。"""
+    try:
+        started = datetime.fromisoformat(str(created_at))
+    except (TypeError, ValueError):
+        return None
+    return int((datetime.now() - started).total_seconds() // 60)
+
+
+def _describe_running(path: Path) -> list[str]:
+    """把「执行中」的那个任务摊开：**是什么、投出去多久了、要不要等**。
+
+    为什么不能只打文件名：控制机上唯一能看到的信号就是这里。早先只打
+    `LAPTOP-68TGB8VB.json.running`，于是**「已经跑了 59 分钟」与「刚投出去 3 秒」
+    长得一模一样** —— 而这两者该做的处置完全相反（一个得去节点看，一个就该等）。
+    2026-09-28 实测就是这么干等的：投 `install` 后 59 分钟，`status` 只说"执行中 1 个"。
+    """
+    data = _read_json(path)
+    if not data:
+        return [f"  执行中: {path.name}（内容读不动 —— 可能正被节点改名，稍后再看）"]
+
+    task_id = str(data.get("task_id") or "")
+    names = [
+        str(s.get("name") or "")
+        for s in (data.get("suites") or [])
+        if isinstance(s, dict) and s.get("name")
+    ]
+
+    head = f"  执行中: {path.name}"
+    if names:
+        head += f" | 套件 {'/'.join(names)}"
+    if task_id:
+        head += f" | 任务 {task_id}"
+    out = [head]
+
+    created = str(data.get("created_at") or "")
+    elapsed = _elapsed_minutes(created)
+    if elapsed is None:
+        out.append(f"     投出时间：{created or '读不出'}（算不出已跑多久）")
+    else:
+        out.append(f"     投出 {created.replace('T', ' ')}，已跑 {elapsed} 分钟")
+
+    elevated = []
+    for name in names:
+        try:
+            if get_suite(name).needs_elevation:
+                elevated.append(name)
+        except KeyError:
+            pass
+    if elevated:
+        out.append(
+            f"     ⚠ 含提权套件（{'/'.join(elevated)}）：由节点侧自己跑，最长静默等 4 小时；"
+            r"真因在【节点本机】reports\_elev\elevated_run.log，控制机看不到"
+        )
+    return out
+
+
 def cmd_status(args) -> int:
     root = farm_root()
     tasks = sorted((root / "tasks").glob("*.json"))
@@ -181,7 +238,8 @@ def cmd_status(args) -> int:
     for f in tasks:
         print(f"  待执行: {f.name}")
     for f in running:
-        print(f"  执行中: {f.name}")
+        for line in _describe_running(f):
+            print(line)
     for f in dones[-10:]:
         print(f"  已完成: {f.name}")
     return 0

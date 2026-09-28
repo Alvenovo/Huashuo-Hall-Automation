@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -95,6 +96,79 @@ def test_dispatch_unknown_suite_fails_fast(farm):
     """套件名写错要当场报错，别投出去才发现。"""
     with pytest.raises(KeyError):
         _dispatch("R01", "no-such-suite")
+
+
+# ---------------- 「执行中」要说清楚是什么、多久了 ----------------
+
+# 控制机侧唯一能看到的信号就是 `status`。早先只打一行文件名，于是
+# 「刚投出去 3 秒」与「已经跑了 59 分钟」长得一模一样 —— 而处置完全相反
+# （一个就该等，一个得去节点看）。2026-09-28 实测就是这么干等的。
+
+
+def _put_running(
+    farm: Path, node: str, *, task_id: str, suites: list[str], created_at: str
+) -> Path:
+    path = farm / "tasks" / f"{node}.json.running"
+    path.write_text(
+        json.dumps({
+            "task_id": task_id, "node": node,
+            "suites": [{"name": n, "shard_id": 1, "shard_count": 1} for n in suites],
+            "created_at": created_at,
+        }, ensure_ascii=False), encoding="utf-8",
+    )
+    return path
+
+
+def _status_out(farm, capsys) -> str:
+    assert farm_control.cmd_status(argparse.Namespace()) == 0
+    return capsys.readouterr().out
+
+
+def test_status_shows_how_long_a_running_task_has_been_going(farm, capsys):
+    """「执行中」必须带上**已跑多久**，以及是哪个任务、哪些套件。"""
+    started = (datetime.now() - timedelta(minutes=59)).isoformat(timespec="seconds")
+    _put_running(farm, "R01", task_id="task_20260928_123053", suites=["install"],
+                 created_at=started)
+
+    out = _status_out(farm, capsys)
+    assert "task_20260928_123053" in out, "要报出任务号，否则没法对着日志查"
+    assert "install" in out, "要报出套件名"
+    assert "已跑 59 分钟" in out, "时长是判断「该不该等」的唯一信号"
+
+
+def test_status_flags_elevated_suites_and_where_their_output_lives(farm, capsys):
+    """提权套件要单独提示：节点自己跑、最长静默等 4 小时、真因在**节点本机**。
+
+    不提示的话，运维会以为提权段的输出也该回传到控制机，然后在共享盘上找一个
+    根本不存在的东西（2026-09-28 实测：控制机侧翻遍也没有）。
+    """
+    started = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    _put_running(farm, "R01", task_id="task_2", suites=["install"], created_at=started)
+
+    out = _status_out(farm, capsys)
+    assert "提权" in out
+    assert "4 小时" in out, "要写出等待上界，否则看到日志不动就会以为已经卡死"
+    assert "elevated_run.log" in out, "要指路到真因所在"
+    assert "节点本机" in out, "要说明这份日志不在控制机、也不在共享盘上"
+
+
+def test_status_does_not_flag_a_readonly_suite_as_elevated(farm, capsys):
+    """反向：只读套件不该被标成提权 —— 标错了会让人白等，或去节点翻一个不存在的日志。"""
+    started = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    _put_running(farm, "R01", task_id="task_3", suites=["launch"], created_at=started)
+
+    out = _status_out(farm, capsys)
+    assert "已跑 1 分钟" in out
+    assert "elevated_run.log" not in out
+
+
+def test_status_does_not_invent_a_duration(farm, capsys):
+    """`created_at` 读不出来时**不许猜成 0** —— 「已跑 0 分钟」看起来像刚投出去，会把排查带偏。"""
+    _put_running(farm, "R01", task_id="task_4", suites=["launch"], created_at="")
+
+    out = _status_out(farm, capsys)
+    assert "分钟" not in out, "读不出时间就不该给出一个时长（0 分钟会被读成「刚投出去」）"
+    assert "算不出已跑多久" in out
 
 
 # ---------------- 汇总报告的凭据列 ----------------
