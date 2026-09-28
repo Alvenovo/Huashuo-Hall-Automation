@@ -1075,7 +1075,7 @@ def test_selftest_isolates_the_pytest_temp_dir(bm):
     真机后果（2026-09-23）：新机第一次跑农场，`unit` 套件 **238 / 599 条 ERROR**，
     报告上看着像"代码烂了"。**每台新机都会这样**，所以必须从源头隔离，不能靠事后清目录。
 
-    这条红了**别改断言**，去改 `SELFTEST_ISOLATION`。
+    这条红了**别改断言**，去改 `_selftest_isolation()`。
     """
     with mock.patch.object(bm.subprocess, "run", return_value=_fake_run()) as run:
         bm.step_selftest(False)
@@ -1085,6 +1085,59 @@ def test_selftest_isolates_the_pytest_temp_dir(bm):
         f"自检没隔离临时目录，会把共享的 pytest-of-<user> 污染成管理员所有：{argv}"
     )
     assert "no:cacheprovider" in argv, f"自检没关掉 pytest 缓存（同样的 ACL 问题）：{argv}"
+
+
+def test_selftest_isolation_creates_its_basetemp_parent(bm, tmp_path, monkeypatch):
+    """**关键保护**：自检的 basetemp **父目录必须自己建** —— 新机 clone 下来它不存在。
+
+    `reports/` 整个在 `.gitignore` 里，所以新机第一次跑 bootstrap 时
+    `reports/_pytest_tmp/` 压根没有。而 pytest 的 `--basetemp` 只做**裸**
+    `mkdir(mode=0o700)`（不带 `parents=True`，pytest 9.1.1 原文如此）——
+    父目录不在就直接 `FileNotFoundError`。
+
+    真机后果（2026-09-28，LAPTOP-68TGB8VB）：**219 条 ERROR / 13.49s**，
+    凡是用了 `tmp_path` 的用例全崩，屏幕上只剩一行被截断的 `FileNotFoun...`，
+    一线会以为是代码烂了。本机当时是**假绿**（`reports/_pytest_tmp/` 早被农场跑批建出来了），
+    所以这条必须靠"先把父目录删掉"来验，不能靠"跑一遍看看"。
+
+    这条红了别改断言 —— 去 `_selftest_isolation()` 里把父目录建上。
+    """
+    missing = tmp_path / "reports" / "_pytest_tmp"
+    monkeypatch.setattr(bm, "PYTEST_TMP_ROOT", missing)
+    assert not missing.exists(), "前提：父目录一开始不存在（新机的真实状态）"
+
+    argv = bm._selftest_isolation()
+
+    assert missing.is_dir(), (
+        "自检的 basetemp 父目录没建出来 —— 新机上凡是用了 tmp_path 的用例会全部 ERROR"
+    )
+    assert any(a.startswith(f"--basetemp={bm.PYTEST_TMP_REL}/") for a in argv), argv
+
+
+def test_selftest_reports_when_the_basetemp_parent_cannot_be_created(bm, tmp_path, monkeypatch):
+    """父目录建不出来时要**说人话并判失败**，不能让 219 条 FileNotFoundError 代替报错。
+
+    "建不出来"用**父路径上是个文件**来造（`mkdir(parents=True)` 必然 OSError），
+    不去 patch `pathlib.Path.mkdir` —— 那是全局的，会把 pytest 自己也弄崩。
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("我不是目录", encoding="utf-8")
+    monkeypatch.setattr(bm, "PYTEST_TMP_ROOT", blocker / "child")
+    # .venv 缺失会先撞上"没有 .venv"那条，测不到这里要测的分支
+    fake_py = tmp_path / "python.exe"
+    fake_py.write_bytes(b"")
+    monkeypatch.setattr(bm, "_venv_python", lambda: fake_py)
+    # 真起进程的话（修复失效时会走到这儿）会拿一个空文件去 CreateProcess，
+    # 炸出来的是 `WinError 193 不是有效的 Win32 应用程序` —— 看不出真正的问题。
+    monkeypatch.setattr(bm, "_run_text", lambda *a, **kw: _fake_run())
+
+    st = bm.step_selftest(False)
+
+    assert not st.ok, "临时根建不出来时必须判失败"
+    joined = "\n".join(st.detail)
+    assert "建自检临时根失败" in joined, joined
+    assert "tmp_path" in joined, joined
+    assert "只读" in joined, joined
 
 
 def test_selftest_rerun_also_isolates(bm):
@@ -1271,9 +1324,39 @@ def test_env_check_disk_failure_is_log_not_fail(bm, tmp_path):
 # 只报警不改值：静默把 800MB 的落点换掉，比让它失败更吓人。
 
 
+# **夹具里那个「别人」的用户名不能写死成某个具体名字**（2026-09-28 真机 LAPTOP-68TGB8VB）：
+# 测试机的用户名就是 `ASUS`，而夹具原来写的是 `C:/Users/asus/...` —— 大小写不敏感比较之下，
+# 夹具里的"别人"**正是本机自己**，`_foreign_profile_owner` 于是返回空串，
+# `test_foreign_profile_owner_detects_other_user` 与
+# `test_env_check_warns_on_foreign_installer_dir` 两条在真机上必红（本机 `admin` 假绿）。
+#
+# 这不是代码缺陷：`_foreign_profile_owner` 的契约就是"排除当前用户"，代码是对的。
+# 是**夹具**假设了"本机用户名不叫 asus"。测试机就叫 ASUS，所以这个坑会每台复发。
+# 同一个坑 `test_repo_hygiene.py::test_config_template_installer_dir_stays_a_detectable_canary`
+# 当时已经想到了（那里留了注释明说"本机用户名恰好叫 ASUS 时金丝雀本来就叫不响"），
+# 这里没照做 —— 所以改成**推导**而不是写死，从根上不可能撞。
+_OTHER_USER_BASE = "other-machine-user"
+
+
+def _other_user() -> str:
+    """夹具用的「别人」用户名，**保证不等于本机用户名**。"""
+    current = Path.home().name.lower()
+    return _OTHER_USER_BASE if _OTHER_USER_BASE != current else f"{_OTHER_USER_BASE}-2"
+
+
+def test_other_user_fixture_never_collides_with_this_machine(bm):
+    """前提守卫：夹具名必须与本机用户名不同，否则下面两条用例在本机是假红。"""
+    other = _other_user()
+    assert other.lower() != Path.home().name.lower(), (
+        f"夹具名 {other!r} 与本机用户名撞了 —— 换一个，别让用例看机器脸色"
+    )
+    assert bm._foreign_profile_owner(Path(f"C:/Users/{other}/Desktop/Test/华硕大厅")) == other
+
+
 def test_foreign_profile_owner_detects_other_user(bm):
     """`C:/Users/<别人>/...` 要能认出来 —— 这是整包拷贝最典型的痕迹。"""
-    assert bm._foreign_profile_owner(Path("C:/Users/asus/Desktop/Test/华硕大厅")) == "asus"
+    other = _other_user()
+    assert bm._foreign_profile_owner(Path(f"C:/Users/{other}/Desktop/Test/华硕大厅")) == other
 
 
 def test_foreign_profile_owner_ignores_public_and_current_user(bm):
@@ -1289,10 +1372,15 @@ def test_foreign_profile_owner_ignores_non_profile_paths(bm):
 
 
 def test_env_check_warns_on_foreign_installer_dir(bm):
-    """核心：发现老机器痕迹要**说人话**，并给出两条明确处理办法。"""
-    st = _fake_env_check(bm, Path("C:/Users/asus/Desktop/Test/华硕大厅"), free_gb=50.0)
+    """核心：发现老机器痕迹要**说人话**，并给出两条明确处理办法。
+
+    路径里的用户名用 `_other_user()` 推导（理由见上面那段注释）——
+    写死的话，用户名恰好同名的测试机上这条必红。
+    """
+    other = _other_user()
+    st = _fake_env_check(bm, Path(f"C:/Users/{other}/Desktop/Test/华硕大厅"), free_gb=50.0)
     joined = "\n".join(st.detail)
-    assert "installer_dir 指向别的用户目录（asus）" in joined, joined
+    assert f"installer_dir 指向别的用户目录（{other}）" in joined, joined
     assert "-InstallerDir" in joined, joined
     assert "删掉 config.local.yaml" in joined, joined
 

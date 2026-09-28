@@ -145,7 +145,7 @@ FIXTURE_REL = "fixtures/7z2602-x64.exe"
 # 与 hall_auto/env_pack.NODE_ENV_FILENAME 是同一条约定，这里 import 过来免得抄错。
 from hall_auto.env_pack import NODE_ENV_FILENAME  # noqa: E402
 from hall_auto.elevation import ELEVATION_SCRIPT, ELEVATION_TASK_NAME  # noqa: E402
-from hall_auto.suites import PYTEST_TMP_REL  # noqa: E402
+from hall_auto.suites import PYTEST_TMP_REL, PYTEST_TMP_ROOT  # noqa: E402
 
 # P2 内部安全工具在共享盘上的相对目录（相对共享根）与本机落地位置。
 # 与 `step_write_local_config` 写的 `security.tools_dir` 必须指向同一个地方，否则白拷。
@@ -218,7 +218,7 @@ REEXEC_ENV = "HALL_BOOTSTRAP_IN_VENV"
 # 列太少又等于没说 —— 12 条够看清是哪一类，剩下的指到完整日志。
 SELFTEST_MAX_LISTED = 12
 
-# 自检用的 pytest 参数：**必须把临时目录和缓存隔离出去**。
+# 自检用的 pytest 参数：**必须把临时目录和缓存隔离出去**，而且**父目录要自己建**。
 #
 # 为什么这条不能省（2026-09-23 真机踩出来的，代价是 238 条 ERROR）：
 # 本步骤是**管理员**跑的（bootstrap 整个要管理员），而 pytest 默认把临时根放在
@@ -234,10 +234,32 @@ SELFTEST_MAX_LISTED = 12
 # `--basetemp` 带 `pid`：每次运行一个新目录，pytest 就不会去 `rm_rf` 别人身份建的目录。
 # `-p no:cacheprovider`：`.pytest_cache/` 有同样的问题（管理员建过之后普通权限写不进，
 # 每轮打一堆 `PytestCacheWarning`）；我们一条都不用 `--lf/--ff/cache` fixture。
-SELFTEST_ISOLATION = [
-    f"--basetemp={PYTEST_TMP_REL}/bootstrap_selftest_p{os.getpid()}",
-    "-p", "no:cacheprovider",
-]
+#
+# ---- 为什么它**必须是函数、不能是常量** ----
+# （2026-09-28 真机 LAPTOP-68TGB8VB，代价是 219 条 ERROR）
+#
+# `reports/` **整个在 `.gitignore` 里**，所以新机 clone 下来压根没有 `reports/_pytest_tmp/`。
+# 而 pytest 的 `--basetemp` 只做**裸** `mkdir(mode=0o700)`（不带 `parents=True`，
+# pytest 9.1.1 `TempPathFactory.getbasetemp` 原文如此）—— 父目录不在就直接
+# `FileNotFoundError`，**凡是用了 `tmp_path` 的用例全部 ERROR**，屏幕上只剩一行被截断的
+# `FileNotFoun...`，看着像"代码烂了"。本机复现一致：244 条 ERROR / 13.9s。
+#
+# 关键：**"父目录要自己建"这条知识在 `hall_auto.suites.pytest_basetemp()` 里是写着的**
+# （那个函数有 `PYTEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)`），
+# 但这里当初写成了模块级常量 —— 常量建不了目录，于是那条知识被丢掉了，
+# 而本机 `reports/_pytest_tmp/` 早就被农场跑批建出来了 → **本机假绿，每台新机必红**。
+# 教训：有副作用的初始化不能写成常量。
+def _selftest_isolation() -> list[str]:
+    """自检的 pytest 隔离参数。**每次调用都把 basetemp 父目录建好**（幂等）。
+
+    建不出来时**让它抛**，由 `step_selftest` 翻成人话 —— 在这里吞掉的话，
+    新机上看到的又是 219 条 `FileNotFoundError`，等于没报。
+    """
+    PYTEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    return [
+        f"--basetemp={PYTEST_TMP_REL}/bootstrap_selftest_p{os.getpid()}",
+        "-p", "no:cacheprovider",
+    ]
 
 
 def _venv_python() -> Path:
@@ -1641,9 +1663,22 @@ def step_selftest(skip: bool) -> Step:
         st.fail("没有 .venv，无法自检")
         return st
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    try:
+        isolation = _selftest_isolation()
+    except OSError as exc:
+        # 不建就直接跑的话，新机上看到的是 219 条 `FileNotFoundError`，
+        # 而根因（临时根建不出来）一个字都不会出现在屏幕上。
+        st.fail(
+            f"建自检临时根失败：{type(exc).__name__}: {exc}。"
+            f"落点 {PYTEST_TMP_ROOT}（相对仓库根 {PYTEST_TMP_REL}）—— 它在 .gitignore 里，"
+            "新机 clone 下来不存在，所以**必须能在仓库目录里建出来**。"
+            "建不出来时凡是用了 tmp_path 的用例都会 ERROR，看着像代码烂了。"
+            "查：仓库目录是否只读 / 被别的身份占着 / 盘满。"
+        )
+        return st
     proc = _run_text(
         [str(py), "-X", "utf8", "-m", "pytest", "tests/unit", "-q", "--skip-env-check",
-         *SELFTEST_ISOLATION],
+         *isolation],
         cwd=str(REPO_ROOT), env=env, check=False,
     )
 
@@ -1746,13 +1781,16 @@ def _failed_case_ids(raw: str) -> list[str]:
 def _rerun_failed_cases(py: Path, failed_ids: list[str], env: dict) -> tuple[str, int]:
     """只重跑失败的那几条用例，返回 (原始输出, rc)。
 
-    隔离参数（`SELFTEST_ISOLATION`）这里也要带 —— 漏了的话重跑那一次又会去用
+    隔离参数（`_selftest_isolation()`）这里也要带 —— 漏了的话重跑那一次又会去用
     共享的 `pytest-of-<user>`，于是"换进程重跑"本身也 PermissionError，
     看起来像"真失败"，把环境级 flake 误判成代码回归。
+
+    父目录不在这里重复兜底：能走到这儿说明首跑那次已经建成功了（同一个进程、幂等），
+    真建不出来时 `step_selftest` 早就 `return st` 了，不会进来。
     """
     proc = _run_text(
         [str(py), "-X", "utf8", "-m", "pytest", *failed_ids, "-q", "--skip-env-check",
-         *SELFTEST_ISOLATION],
+         *_selftest_isolation()],
         cwd=str(REPO_ROOT), env=env, check=False,
     )
     return (proc.stdout or "") + (proc.stderr or ""), proc.returncode or 0
