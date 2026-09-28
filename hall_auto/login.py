@@ -21,6 +21,8 @@ from hall_auto.winapi import (
 LOGIN_DIALOG_TIMEOUT_SEC = 15
 LOGIN_SUBMIT_TIMEOUT_SEC = 25
 CODE_RESEND_TIMEOUT_SEC = 65  # 短信网关冷却常为 60s，还原程紧接第一程再发时要等发送按钮回来
+CODE_SEND_CONFIRM_SEC = 8  # 点完「发送验证码」后，等按钮进倒计时态（从控件树消失）
+CODE_SEND_RETRY_SEC = 75  # 服务端短信限流窗口常为 60s：在这段时间里反复点，别一次就判死
 MICROSOFT_WINDOW_TIMEOUT_SEC = 15  # 点微软入口后内嵌登录窗出现
 MICROSOFT_PAGE_TIMEOUT_SEC = 20  # WebView 里邮箱框出现（实测 ~1.7s，留余量）
 MICROSOFT_SSO_TIMEOUT_SEC = 25  # 点磁贴/提交后回到大厅已登录态
@@ -384,41 +386,73 @@ def open_forgot_password_page(pid: int) -> None:
     )
 
 
-def request_forgot_sms(pid: int, user: str) -> None:
+def request_forgot_sms(pid: int, user: str, *, retry_sec: float = CODE_SEND_RETRY_SEC) -> None:
     """忘记密码页填手机号并点「发送验证码」。页面没有协议勾选框。
 
     点完 CodeSendBtn 从控件树消失（与登录短信页同一套倒计时实现），
     以消失作为已触发发送的信号，最终以手机收到短信为准。
     注意别拿 SetBtn 当页面判据：主窗口导航栏的「设置」按钮 aid 也是 SetBtn。
+
+    ## 「按钮回到控件树」不等于「服务端放行」（2026-09-28 真机实付）
+
+    倒计时是**页面自己**的 UI —— 重新进这一页就重置了；限流在**服务端**（常为 60s）。
+    还原程紧接第一程再发，必然落在那个窗口里，于是**点一次 + 等 8s 就判死**
+    等于这条用例的第二程注定失败（2026-09-28 那轮就是这么挂的：
+    29.7s 跑完，第二程发码离第一程只隔了约 20s）。
+
+    所以改成在 `retry_sec` 窗口内**反复点**：点中的那一次按钮会进倒计时态、直接返回，
+    所以不会多点、不会多发短信；连点 N 次全不消失，才是「点击真没落上」（产品缺陷）——
+    报错里带上连点次数，好把这两种区分开。
     """
     phone = _by_aid(pid, "Edit", "MobileInput")
     if phone is None:
         raise LaunchError("忘记密码：找不到手机号输入框")
     phone.set_edit_text(user)
-    # 还原程紧接第一程再发时可能还在冷却（CodeSendBtn 未回控件树），先等它出现再点
-    if not wait_until(
-        lambda: _by_aid(pid, "Button", "CodeSendBtn") is not None,
-        timeout_sec=CODE_RESEND_TIMEOUT_SEC,
-        interval=0.5,
-    ):
-        raise LaunchError("忘记密码：等不到「发送验证码」按钮（可能仍在冷却）")
-    send = _by_aid(pid, "Button", "CodeSendBtn")
-    if not _press_button(send):
-        raise LaunchError("忘记密码：点不动「发送验证码」")
-    if not wait_until(lambda: _by_aid(pid, "Button", "CodeSendBtn") is None, timeout_sec=8, interval=0.5):
-        # 2026-09-23 真机踩出：这条报错原来只说「可能没触发」，把**最常见的真因**漏掉了。
-        # 短信验证码是**服务端限流**的：短时间内给同一个号发太多次，服务端拒绝发送，
-        # 界面上通常只闪一下提示（截图里抓不到），按钮留在原位不动 ——
-        # 表现与"点击没落上"完全一样。一线看到「可能没触发」会去查控件、查 UIA，
-        # 方向全错。所以这里把限流写在第一条，并给出可执行动作。
-        raise LaunchError(
-            "忘记密码：点发送后 CodeSendBtn 没消失，可能没触发。"
-            "**先按「短信发送超限」排查**：短时间内给同一个号发太多次时，服务端会拒绝发送，"
-            "按钮留在原位不动、提示只闪一下（截图抓不到）。"
-            "处理：① 换一个没被限流的测试号；② 等冷却（通常十几分钟到次日）再跑；"
-            "③ 本条用例要**连发 2 个码**（重置 + 还原），是最容易撞上超限的一条。"
-            "若确实刚发过码且号也没超限，再按控件没落点去查。"
-        )
+
+    deadline = time.time() + retry_sec
+    attempts = 0
+    presses = 0
+    while True:
+        # 还原程紧接第一程再发时可能还在冷却（CodeSendBtn 未回控件树），先等它出现再点
+        if not wait_until(
+            lambda: _by_aid(pid, "Button", "CodeSendBtn") is not None,
+            timeout_sec=CODE_RESEND_TIMEOUT_SEC,
+            interval=0.5,
+        ):
+            raise LaunchError("忘记密码：等不到「发送验证码」按钮（可能仍在冷却）")
+        attempts += 1
+        send = _by_aid(pid, "Button", "CodeSendBtn")
+        if send is not None and _press_button(send):
+            presses += 1
+            if wait_until(
+                lambda: _by_aid(pid, "Button", "CodeSendBtn") is None,
+                timeout_sec=CODE_SEND_CONFIRM_SEC,
+                interval=0.5,
+            ):
+                return
+        if time.time() >= deadline:
+            if not presses:
+                # 一次都没点动 → 与"点了但没生效"是两回事，排查方向也不同（控件/UIA）
+                raise LaunchError(
+                    f"忘记密码：连试 {attempts} 次都点不动「发送验证码」按钮（{retry_sec:g}s 内）。"
+                    "这不是限流 —— 限流的表现是「点得动、但按钮不消失」。按控件没落点去查。"
+                )
+            # 2026-09-23 真机踩出：这条报错原来只说「可能没触发」，把**最常见的真因**漏掉了。
+            # 短信验证码是**服务端限流**的：短时间内给同一个号发太多次，服务端拒绝发送，
+            # 界面上通常只闪一下提示（截图里抓不到），按钮留在原位不动 ——
+            # 表现与"点击没落上"完全一样。一线看到「可能没触发」会去查控件、查 UIA，
+            # 方向全错。所以这里把限流写在第一条，并给出可执行动作。
+            raise LaunchError(
+                f"忘记密码：连点 {presses} 次「发送验证码」，CodeSendBtn 都没进倒计时态"
+                f"（{retry_sec:g}s 内）。"
+                "**先按「短信发送超限」排查**：短时间内给同一个号发太多次时，服务端会拒绝发送，"
+                "按钮留在原位不动、提示只闪一下（截图抓不到）。"
+                "处理：① 换一个没被限流的测试号；② 等冷却（通常十几分钟到次日）再跑；"
+                "③ 本条用例要**连发 2 个码**（重置 + 还原），是最容易撞上超限的一条。"
+                "若确实刚发过码且号也没超限，再按控件没落点去查 —— "
+                "连点多次都不动是强信号（一次点不动可能只是没落上）。"
+            )
+        time.sleep(3)
 
 
 def submit_forgot_reset(pid: int, code: str, new_password: str) -> dict:
@@ -941,36 +975,93 @@ def microsoft_pick_account(ms_win, email: str) -> None:
         tile.click_input()
 
 
-def wait_microsoft_logged_in(pid: int, ms_win=None) -> str:
-    """SSO/提交后等回大厅已登录态，返回用户区文案。
+def _user_area_text(pid: int) -> str:
+    """已登录态用户区的文案（如「用户信息区域，已登录用户：asus_1883771273」）。
+
+    ⚠️ 这里显示的是**账号昵称**，不是登录手机号 —— 别拿它当"登录的是哪个号"的证据，
+    见 `tests/launch/test_p1_login.py::_assert_user_area_shows` 与《运行手册.md》「坑 13」。
+    """
+    return popup_text(_by_aid(pid, "Button", "UserInfoPart").element_info.name)
+
+
+def _microsoft_login_failure(pid: int, ms_win) -> LaunchError:
+    """微软登录等不到已登录态时**该报哪一种错**。
+
+    抽成一个函数是为了让「只等已登录」和「等已登录**或**绑定弹窗」两条走同一套口径 ——
+    各写一遍迟早分叉，而分叉的代价是现场拿到一个指向错误方向的报错。
+
+    三种情况：
+      · 有窗口挡着 → `LaunchError`（环境问题）。**不能算码错** ——
+        WebView2 被遮挡就不渲染，重输多少次都一样，只会白耗人的时间；
+      · 没遮挡、但 OTP 输入框还在 → 页面停在原地，最可能是码错/过期 → `CodeRejected`；
+      · 其它 → 原来的 `LaunchError`。
 
     超时时**必须把「大厅是不是被挡住了」写进报错**：2026-09-23 真机这条超时 40s，
-    而失败截图里大厅一个像素都没露（微信在前台）。大厅主内容区是 WebView2，
-    被遮挡时 Chromium 暂停渲染 —— 登录页永远提交不出去，而 Win32 控件照样读得到。
-    人得逐张看截图才能定性，所以这里直接给出「谁挡着」。
-
-    **传了 `ms_win` 才判"是不是码被拒"**（2026-09-28 加，给人在环重输用）：
-
-      · 有窗口挡着 → 环境问题，抛 `LaunchError`。**不能算码错** ——
-        那种情况下重输多少次都一样，只会白耗人的时间；
-      · 没遮挡、但 OTP 输入框还在 → 页面停在原地，最可能是码错/过期 → `CodeRejected`；
-      · 其它 → 保持原来的 `LaunchError`。
-
-    无人值守那条（`test_microsoft_login_sso`）不传 `ms_win`，行为一字未变。
+    而失败截图里大厅一个像素都没露（微信在前台）。人得逐张看截图才能定性，
+    所以这里直接给出「谁挡着」。
     """
-    deadline = time.time() + MICROSOFT_SSO_TIMEOUT_SEC
-    while time.time() < deadline:
-        if logged_in(pid):
-            return popup_text(_by_aid(pid, "Button", "UserInfoPart").element_info.name)
-        time.sleep(0.5)
     hint = occlusion_hint(pid)
     detail = hint or f"窗口诊断未发现问题。{window_state_facts(pid)}"
     if ms_win is not None and not hint and microsoft_code_input(ms_win) is not None:
-        raise CodeRejected(
+        return CodeRejected(
             "微软登录：提交的登录代码没被接受，OTP 输入框还在 —— 大概率是码输错或已过期\n"
             f"  ⚠️ {detail}"
         )
-    raise LaunchError(f"微软登录：提交后未进入已登录态\n  ⚠️ {detail}")
+    return LaunchError(f"微软登录：提交后未进入已登录态\n  ⚠️ {detail}")
+
+
+def wait_microsoft_logged_in(pid: int, ms_win=None, timeout_sec: float | None = None) -> str:
+    """SSO/提交后等回大厅已登录态，返回用户区文案。
+
+    传了 `ms_win` 才判"是不是码被拒"（给人在环重输用），口径见 `_microsoft_login_failure`。
+    无人值守那条（`test_microsoft_login_sso`）不传 `ms_win`，行为一字未变。
+
+    ⚠️ **它只等「已登录」，等不到「绑定手机号」** —— 而没绑过手机号的账号
+    登录成功后必须绑完才进已登录态（见 `wait_microsoft_logged_in_or_bind`）。
+    人在环那条收码后用**那个**，别用这个。
+    """
+    deadline = time.time() + (MICROSOFT_SSO_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
+    while time.time() < deadline:
+        if logged_in(pid):
+            return _user_area_text(pid)
+        time.sleep(0.5)
+    raise _microsoft_login_failure(pid, ms_win)
+
+
+def wait_microsoft_logged_in_or_bind(
+    pid: int,
+    ms_win,
+    timeout_sec: float | None = None,
+) -> tuple[str, str]:
+    """提交登录代码后等**两个可能的结果**：回大厅已登录，或弹出「绑定手机号」。
+
+    返回 `("logged_in", 用户区文案)` 或 `("bind", "")`。
+
+    ## 为什么必须一起等（2026-09-28 真机实锤）
+
+    微软账号**没绑过手机号**时，代码提交成功后大厅会弹「绑定手机号」，
+    而它是登录的**必填一步** —— 不绑就回不到已登录态（同一件事，
+    `test_microsoft_login_sso` 里 2026-09-23 就写过）。
+
+    原来只等 `logged_in`，于是这种情况**必然超时**，报出来是
+    「微软登录：提交后未进入已登录态」，把「**码是对的、登录已经成功**、
+    只是卡在绑定」这个真因盖成"登录失败"。更坑的是窗口诊断还会显示"一切正常"
+    （`遮挡=无`、`visible=True`），现场唯一的线索是收尾时那句
+    `（退出登录前先关掉了残留的「绑定手机号」弹窗 —— 它挡着用户区）`
+    —— 人得逐张翻日志才看得出来。
+
+    `timeout_sec` 不给时沿用 `MICROSOFT_SSO_TIMEOUT_SEC`；超时走
+    `_microsoft_login_failure` 的分流（遮挡 / 码错 / 其它），口径与原来一致。
+    """
+    deadline = time.time() + (MICROSOFT_SSO_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
+    while time.time() < deadline:
+        if logged_in(pid):
+            return "logged_in", _user_area_text(pid)
+        # timeout=0：**只探一次不等待** —— 这个循环本身就是等待，别在里面再叠一层。
+        if find_bind_dialog(pid, timeout_sec=0) is not None:
+            return "bind", ""
+        time.sleep(0.5)
+    raise _microsoft_login_failure(pid, ms_win)
 
 
 # ---------------------------------------------------------------------------

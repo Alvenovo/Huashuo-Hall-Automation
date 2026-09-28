@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from hall_auto.console import focus_console
-from hall_auto.launch import start_fresh, wait_main_window, wait_until_ready
+from hall_auto.launch import LaunchError, start_fresh, wait_main_window, wait_until_ready
 from hall_auto.login import (
     BIND_DIALOG_TIMEOUT_SEC,
     _by_aid,
@@ -34,6 +34,7 @@ from hall_auto.login import (
     submit_microsoft_email,
     switch_login_tab,
     wait_microsoft_logged_in,
+    wait_microsoft_logged_in_or_bind,
     wait_microsoft_state,
 )
 from hall_auto.product import stop_main_process
@@ -131,22 +132,37 @@ def test_login_dialog_controls(ready_pid):
 def _assert_user_area_shows(user: str, name: str) -> None:
     """断言用户区显示的账号能对应上**登录用的那个手机号**。
 
-    ## 定性（2026-09-23 15:33 真机）
+    ## 先看清用户区显示的是什么（2026-09-28 更正）
 
-    曾经失败过：显示 `用户信息区域，已登录用户：asus_1883771273`，
-    不含登录号 `19552261935` 的尾号。**换一个测试号之后这条断言直接通过** ——
-    所以**断言是对的**，问题在那个账号：它被**绑到了另一个手机号**，
-    用户区显示的是**绑定号**。不是产品缺陷，也不是断言口径问题。
+    用户区显示的是**账号昵称**，不是手机号、也不是"绑定号"：
 
-    以后再遇到同样现象，排查顺序：
-      1. 先比对显示里那串数字**是不是这个号的绑定号**（App 里看一眼绑定关系）；
-      2. 再怀疑上次登录态残留 —— 但两条用例登录前都先 `logout()`，
-         而发码 / 填密码都需要登录弹窗重新出现，所以这条基本可以先排除。
+    ```
+    用户信息区域，已登录用户：asus_1883771273
+    ```
+
+    `1883771273` 只有 10 位，**不是合法的国内手机号**（11 位、1 开头）——
+    它是这个账号的昵称。所以「用户区显示的是绑定号」这个 2026-09-23 的定性**是错的**
+    （那轮"换个号就过了"只说明另一个号的**昵称**恰好是手机号，证明不了显示的是绑定号）。
+
+    ## 所以这条断言的真实前提
+
+    它其实在断言：**这个账号的昵称里含登录手机号的尾号**。
+    那是**账号数据**，不是产品不变量 —— 昵称是用户可以随便改的。
+
+    失败时的正确处置（按顺序）：
+      1. **换一个昵称就是手机号的测试号**（最省事，`HALL_TEST_USER` 换掉即可）；
+      2. 或在 App 里把这个号的昵称改成登录手机号；
+      3. 真要长期用「昵称任意」的号，就得给一个**显式的期望昵称**（配置项），
+         别再从手机号尾号反推 —— 那是猜。
+
+    断言本身保留：它仍是"登录进去的是不是我们要的那个账号"的唯一检查，
+    只是**别再把失败读成"产品缺陷"或"绑错号"**。登录是成功的。
     """
     assert user[-5:] in name, (
         f"已登录态的用户区没带登录手机号的尾号：显示 {name!r}，期望含 {user[-5:]!r}。\n"
-        "  · 先怀疑：这个号的**绑定手机号**是不是另一个号（用户区显示的是绑定号，不是登录号）。\n"
-        "  · 再怀疑：上一次登录态残留（但登录前已 logout()，基本可排除）。\n"
+        "  · **登录是成功的**，失败的是这条「账号对不对」的检查 —— 别当产品缺陷报。\n"
+        "  · 用户区显示的是**账号昵称**（如 asus_1883771273），不是手机号、也不是绑定号。\n"
+        "  · 正解：换一个**昵称就是登录手机号**的测试号（或把该号昵称改成手机号）。\n"
         "  详见《运行手册.md》「坑 13」。"
     )
 
@@ -259,6 +275,11 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
     **登录成功后**如果弹出「绑定手机号」（没绑过的账号才弹），会接着自动
     填号 → 点获取验证码 → 问人要短信码 → 提交（见 `_bind_phone_if_prompted`）。
 
+    ⚠️ 2026-09-28 修正：这个弹窗**不是"登录成功之后"才弹**，它就是**登录的最后一步** ——
+    不绑就回不到已登录态。所以等结果时用的是 `wait_microsoft_logged_in_or_bind`，
+    「已登录」和「弹了绑定窗」一起等。以前只等已登录，于是这台没绑过手机号的机器上
+    这条**必然报「提交后未进入已登录态」**，而码其实是对的。
+
     验证码**输错了不用重跑整条**（2026-09-28）：脚本发现码没被接受会在原地
     再问一次，最多 `CODE_MAX_ATTEMPTS` 次，**不会重发码**；随时直接回车放弃。
     """
@@ -286,8 +307,27 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
 
             必须绑在一起：只提交不等结果的话，码错的失败要等下一轮才暴露，
             人会以为"这次成功了"。
+
+            等的是「已登录 **或** 弹了绑定手机号」，不是只等已登录 ——
+            2026-09-28 真机实锤：这个微软账号没绑过手机号，码是对的、登录也成功了，
+            但「绑定手机号」是**必填一步**，不绑就回不到已登录态。只等已登录必然超时，
+            报出来却是「提交后未进入已登录态」，把真因盖成"登录失败"。
             """
             submit_microsoft_code(ms_win, code)
+            state, name = wait_microsoft_logged_in_or_bind(ready_pid, ms_win)
+            if state != "bind":
+                return name
+            # 走到这里说明**码是对的**（码错了不会弹绑定窗），登录已经成功，
+            # 只是卡在绑定。人在环，正好有人能收短信码。
+            print("\n（登录代码已被接受 —— 弹出「绑定手机号」，这是登录的必填一步，接着绑）")
+            status = _bind_phone_if_prompted(cfg, ready_pid)
+            if status != "bound":
+                pytest.skip(
+                    "微软登录代码**已被接受**（不是码错、也不是登录失败），"
+                    "但卡在「绑定手机号」这一步 —— 这个账号没绑过，不绑就回不到已登录态；"
+                    f"本次绑定状态={status!r}。"
+                    "根治办法：手工把微软账号绑一次手机号，之后这条就能跑通。"
+                )
             return wait_microsoft_logged_in(ready_pid, ms_win)
 
         status, name = ask_code_until_accepted(
@@ -299,8 +339,9 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
             pytest.skip("人工放弃回填（登录代码已发出）")
         assert logged_in(ready_pid), "提交验证码后仍未进入已登录态"
         assert "已登录" in str(name), f"已登录态用户区文案异常: {name!r}"
-        # 没绑过手机号的账号，登录成功后会弹绑定弹窗 —— 它挡着主界面，
-        # 不在这里处理掉，下面的 logout() 就点不动（模态窗）。
+        # 兜底：正常路径上「绑定手机号」已经在 `_submit_ms_code` 里处理掉了
+        # （它是登录的必填一步，不绑到不了这里）。这一句防的是"已登录之后才弹"的
+        # 另一种时序 —— 弹窗是模态的，不收掉下面的 logout() 就点不动。
         _bind_phone_if_prompted(cfg, ready_pid)
     finally:
         logout(ready_pid)
@@ -346,6 +387,56 @@ def test_sms_login_manual(cfg, ready_pid):
     assert not logged_in(ready_pid)
 
 
+RESTORE_FAILED_WARNING = (
+    "还原程失败：账户可能停在【新密码】！"
+    "请先用 HALL_TEST_NEW_PASSWORD 登录一次，手工改回原密码；"
+    "或等短信冷却后重跑本条（它会自己再走一遍还原）。"
+)
+
+
+def _restore_old_password(ready_pid: int, user: str, old_password: str) -> None:
+    """第二程 NEW -> OLD 还原：改回原密码 + 用原密码登一次验证。
+
+    幂等开页（`open_forgot_password_page` 自己会在已在页面上时直接返回），
+    所以不管上一程把登录窗留在什么状态都能重新导航到位。
+
+    ⚠️ 这一段里**任何一步失败都意味着账户可能停在【新密码】** ——
+    调用方必须用 `_report_restore_failure` 收场，别让它裸抛。
+    """
+    logout(ready_pid)
+    open_forgot_password_page(ready_pid)
+    request_forgot_sms(ready_pid, user)
+    status, _ = ask_code_until_accepted(
+        _ask_code,
+        lambda code: submit_forgot_reset(ready_pid, code, old_password),
+        what="【第2次·还原原密码】输入手机收到的重置验证码",
+    )
+    if status != "ok":
+        raise LaunchError("人工放弃还原（账户可能仍停在【新密码】）")
+    logout(ready_pid)
+    login_with_password_value(ready_pid, user, old_password)
+    assert logged_in(ready_pid), "原密码登录后仍未进入已登录态，还原可能没生效"
+
+
+def _report_restore_failure(primary: BaseException | None, restore_exc: BaseException) -> None:
+    """还原程挂了怎么收场：**无论如何都要让人知道账户可能停在【新密码】**。
+
+    为什么单拎出来（2026-09-28 真机实付）：原来只有「人放弃还原」那条分支写了这句话，
+    而 `request_forgot_sms` 自己抛错（短信限流，见《运行手册.md》「坑 12」）会**绕过**它 ——
+    现场看到的是「连点 N 次发送按钮都没进倒计时态」，**一个字都没提密码可能已经改了**。
+    而那一轮第一程其实是成功的（只有一条异常链、总耗时 29.7s），
+    也就是说那个测试号真的停在了 NEW 上，却没人被告知。
+
+    `primary` 不为 None = 本条用例本来就已失败/跳过 → 只在日志里补一句警告，
+    **不盖掉原报错**（原报错才是这次要查的东西）；否则把警告本身作为失败抛出去。
+    """
+    message = f"{RESTORE_FAILED_WARNING}还原失败原因：{restore_exc}"
+    if primary is not None:
+        print(f"\n⚠️ {message}\n（本条用例本来就已经失败/跳过，上面那条才是原始报错）")
+        return
+    raise AssertionError(message) from restore_exc
+
+
 @pytest.mark.login
 @pytest.mark.manual
 def test_forgot_password_reset_manual(cfg, ready_pid):
@@ -361,6 +452,11 @@ def test_forgot_password_reset_manual(cfg, ready_pid):
 
     两个码**输错了都能在原地重输**（2026-09-28，同一个码不重发）。人放弃不提交时
     `submitted` 立不起来，还原程**跳过** —— 密码本来就没动，不该再要人输一个码。
+
+    ⚠️ 还原程里**任何一步**失败（含发码被限流），报错都必须带
+    `RESTORE_FAILED_WARNING` —— 那时账户可能真的停在【新密码】上。
+    2026-09-28 那轮就是漏了这条：还原程发码撞限流、裸抛了一句限流提示，
+    "密码可能已经改了"一个字都没说，而第一程其实是成功的。
     """
     user, old_password = cfg.test_account()
     new_password = cfg.new_password()
@@ -389,6 +485,7 @@ def test_forgot_password_reset_manual(cfg, ready_pid):
         return submit_forgot_reset(ready_pid, code, new_password)
 
     # 提交一旦发出，密码就可能已变 NEW；放进 try，让 finally 的还原程兜住提交本身报错的情况
+    primary: BaseException | None = None
     try:
         status, _ = ask_code_until_accepted(
             _ask_code,
@@ -400,23 +497,18 @@ def test_forgot_password_reset_manual(cfg, ready_pid):
         logout(ready_pid)
         login_with_password_value(ready_pid, user, new_password)
         assert logged_in(ready_pid), "新密码登录后仍未进入已登录态，重置可能没生效"
+    except BaseException as exc:  # noqa: BLE001 —— 连 skip 一起兜，见下
+        # 记下"这条用例本来就挂了/跳了"，还原程再挂时**不能盖掉它** ——
+        # 原报错才是这次要查的东西（2026-09-28：还原程自己抛错，把上面
+        # 「账户可能停在【新密码】」那句提示整个绕过去了，现场只看到限流报错）。
+        primary = exc
+        raise
     finally:
         # 人放弃（一次都没提交）时密码没动，**不必**白折腾一趟还原程 ——
         # 那还要人再输一个码，而这时账户本来就是原样。
         if submitted:
-            # 第二程 NEW -> OLD 还原（幂等开页，不管上一程把窗口留在什么状态）
-            logout(ready_pid)
-            open_forgot_password_page(ready_pid)
-            request_forgot_sms(ready_pid, user)
-            status2, _ = ask_code_until_accepted(
-                _ask_code,
-                lambda code: submit_forgot_reset(ready_pid, code, old_password),
-                what="【第2次·还原原密码】输入手机收到的重置验证码",
-            )
-            if status2 != "ok":
-                raise AssertionError(
-                    "还原中断：账户可能停在【新密码】，请用 HALL_TEST_NEW_PASSWORD 登录后手动改回原密码！"
-                )
-            logout(ready_pid)
-            login_with_password_value(ready_pid, user, old_password)
-            assert logged_in(ready_pid), "原密码登录后仍未进入已登录态，还原可能没生效"
+            try:
+                _restore_old_password(ready_pid, user, old_password)
+            except BaseException as restore_exc:  # noqa: BLE001
+                _report_restore_failure(primary, restore_exc)
+

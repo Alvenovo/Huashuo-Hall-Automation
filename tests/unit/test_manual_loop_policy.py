@@ -218,3 +218,93 @@ def test_manual_retry_callbacks_never_send_a_code():
         if bad:
             offenders.append(f"第 {call.lineno} 行：{sorted(bad)}")
     assert not offenders, f"重试回调里在发码，每次重输都会重发一次：{offenders}"
+
+
+# ---------------------------------------------------------------------------
+# 收码后等结果：**「已登录」和「绑定手机号」要一起等**
+#
+# 2026-09-28 真机实锤：微软账号没绑过手机号时，代码提交成功后弹「绑定手机号」，
+# 而它是登录的**必填一步** —— 不绑就回不到已登录态。原来只等已登录，
+# 于是必然超时，报出来是「微软登录：提交后未进入已登录态」，
+# 把「码是对的、登录已成功、卡在绑定」盖成"登录失败"。
+#
+# 这个坑**在无人值守那条上 2026-09-23 就修过一次**（`test_microsoft_login_sso` 加了
+# `find_bind_dialog` 分支），只是人在环那条漏了 —— 所以这里用结构守卫钉住，
+# 而不是指望下一个人记得。
+# ---------------------------------------------------------------------------
+
+
+def _find_func(tree: ast.Module, name: str) -> ast.FunctionDef:
+    node = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name),
+        None,
+    )
+    assert node is not None, f"{name} 不见了"
+    return node
+
+
+@pytest.mark.unit
+def test_manual_microsoft_case_waits_for_the_bind_dialog_too():
+    """**关键保护**：人在环收码那条等结果时必须用 `wait_microsoft_logged_in_or_bind`。
+
+    只等已登录的话，在**没绑过手机号**的账号上必然超时（2026-09-28 真机实锤）。
+    而且回调里还得把绑定流程接上 —— 光"看见弹窗"不处理，一样回不到已登录态。
+    """
+    submit = _find_func(_manual_tree(), "_submit_ms_code")
+    called = _called_names(submit)
+    assert "wait_microsoft_logged_in_or_bind" in called, (
+        "收码后只等已登录 —— 没绑过手机号的账号上这条必然误报「提交后未进入已登录态」"
+    )
+    assert "_bind_phone_if_prompted" in called, "看到绑定弹窗却不接绑定流程，照样回不到已登录态"
+
+
+@pytest.mark.unit
+def test_forgot_password_restore_failure_is_wrapped_and_reports_the_new_password():
+    """**关键保护**：还原程里**任何一步**失败，报错都要带「账户可能停在【新密码】」。
+
+    2026-09-28 真机实付：还原那程发码撞短信限流、裸抛了一句限流提示，
+    「密码可能已经改了」一个字都没说 —— 而第一程是**成功**的，账户真停在了 NEW 上。
+
+    所以盯的是**结构**：finally 里的还原调用必须被 try/except 包住，
+    且 handler 里要调 `_report_restore_failure`（它负责把警告抛出去或补进日志）。
+    """
+    fn = _find_func(_manual_tree(), "test_forgot_password_reset_manual")
+    finals = [n for n in ast.walk(fn) if isinstance(n, ast.Try) and n.finalbody]
+    assert finals, "这个用例没有 finally 还原程了？"
+
+    guarded = [
+        handler
+        for node in finals
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Try)
+        for handler in inner.handlers
+        if "_report_restore_failure" in _called_names(handler)
+    ]
+    assert guarded, (
+        "还原程没有被 try/except 包住并交给 `_report_restore_failure` —— "
+        "发码/提交任何一步裸抛，都会把「账户可能停在【新密码】」这句警告绕过去"
+    )
+
+
+@pytest.mark.unit
+def test_restore_failure_warning_names_the_new_password():
+    """`_report_restore_failure` 的两条出口：不盖原报错 / 没原报错时自己抛。
+
+    光有结构（上一条）不够 —— 还得确认那句警告里真的写了「新密码」，
+    否则现场读了也不知道账户被改过。
+    """
+    from hall_auto.launch import LaunchError
+
+    from tests.launch.test_p1_login import RESTORE_FAILED_WARNING, _report_restore_failure
+
+    assert "新密码" in RESTORE_FAILED_WARNING
+
+    # ① 本条用例本来就已失败 → 只补警告，不抛（原报错才是要查的东西）
+    _report_restore_failure(LaunchError("原报错"), LaunchError("还原挂了"))
+
+    # ② 没有原报错 → 把警告作为失败抛出去，并带上还原失败的原因
+    with pytest.raises(AssertionError) as exc:
+        _report_restore_failure(None, LaunchError("还原挂了"))
+    assert "新密码" in str(exc.value)
+    assert "还原挂了" in str(exc.value)
+

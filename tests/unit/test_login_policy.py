@@ -672,6 +672,141 @@ def test_microsoft_login_without_a_window_handle_keeps_the_old_behaviour():
     assert type(exc) is login.LaunchError
 
 
+# ---------------------------------------------------------------------------
+# 人在环收码：等「已登录」**或**「弹了绑定手机号」
+#
+# 2026-09-28 真机实锤：微软账号没绑过手机号时，代码提交成功后弹「绑定手机号」，
+# 而它是登录的**必填一步** —— 不绑就回不到已登录态。原来只等已登录，
+# 这种情况必然超时，报出来却是「微软登录：提交后未进入已登录态」，
+# 把「码是对的、登录已经成功、卡在绑定」这个真因盖成"登录失败"；
+# 窗口诊断还会显示"一切正常"（遮挡=无 / visible=True），现场极难归因。
+#
+# 唯一的线索是收尾时 `logout()` 打的那句
+# 「（退出登录前先关掉了残留的「绑定手机号」弹窗 —— 它挡着用户区）」。
+# ---------------------------------------------------------------------------
+
+
+def _ms_or_bind(*, logged: bool, bind: bool, hint: str = "", otp_present: bool = False, timeout: int = 1):
+    """跑一次 `wait_microsoft_logged_in_or_bind`，返回 (状态, 文案) 或抛出的异常。"""
+    with (
+        mock.patch.object(login, "logged_in", return_value=logged),
+        mock.patch.object(login, "find_bind_dialog", return_value=object() if bind else None),
+        mock.patch.object(login, "_user_area_text", return_value="用户信息区域，已登录用户：x"),
+        mock.patch.object(login.time, "sleep"),
+        mock.patch.object(login, "occlusion_hint", return_value=hint),
+        mock.patch.object(login, "window_state_facts", return_value="窗口诊断"),
+        mock.patch.object(
+            login, "microsoft_code_input", return_value=mock.Mock() if otp_present else None
+        ),
+        mock.patch.object(login, "MICROSOFT_SSO_TIMEOUT_SEC", timeout),
+    ):
+        return login.wait_microsoft_logged_in_or_bind(1, object())
+
+
+@pytest.mark.unit
+def test_microsoft_bind_dialog_is_not_reported_as_a_login_failure():
+    """**关键保护**：弹了「绑定手机号」要返回 `bind`，**不能**报成登录失败。
+
+    报成登录失败就是 2026-09-28 那轮的真事：码是对的、登录已成功，人却拿到
+    「提交后未进入已登录态」，去查登录链路 —— 方向全错。
+    """
+    assert _ms_or_bind(logged=False, bind=True) == ("bind", "")
+
+
+@pytest.mark.unit
+def test_microsoft_logged_in_state_still_wins():
+    """已登录态照旧返回 `("logged_in", 用户区文案)` —— 别把正常路径改坏。"""
+    state, name = _ms_or_bind(logged=True, bind=True)
+    assert state == "logged_in"
+    assert "已登录" in name
+
+
+@pytest.mark.unit
+def test_microsoft_bind_wait_timeout_keeps_the_same_diagnosis():
+    """超时口径**一字未变**：没遮挡 + OTP 框还在 → 仍判码错（可重试）。
+
+    抽 `_microsoft_login_failure` 就是为了让两个入口共用一套口径；
+    各写一遍迟早分叉，而分叉的代价是现场拿到一个指向错误方向的报错。
+    """
+    with pytest.raises(login.LaunchError) as exc:
+        _ms_or_bind(logged=False, bind=False, otp_present=True, timeout=0)
+    assert type(exc.value) is login.CodeRejected, f"应该是可重试的 CodeRejected，实际 {type(exc.value)}"
+
+
+# ---------------------------------------------------------------------------
+# 忘记密码发码：「按钮回到控件树」≠「服务端放行」
+#
+# 2026-09-28 真机实付：倒计时是**页面自己**的 UI，重新进这一页就重置了；
+# 限流在**服务端**（常为 60s）。还原程紧接第一程再发必然落在那个窗口里，
+# 原来「点一次 + 等 8s 就判死」，等于这条用例的第二程**注定失败**
+# （那轮 29.7s 跑完，第二程发码离第一程只隔了约 20s）。
+# ---------------------------------------------------------------------------
+
+
+def _forgot_send(*, button_goes_away: bool, press_ok: bool = True):
+    """跑一次 `request_forgot_sms`，返回 (点击次数, 抛出的异常或 None)。"""
+    clicks: list[int] = []
+    clock = {"t": 0.0}
+
+    def _now():
+        clock["t"] += 5.0
+        return clock["t"]
+
+    def _wait(predicate, timeout_sec=10.0, interval=0.3):
+        # 长超时 = 「等按钮出现」（真去问一次谓词）；短超时 = 「等按钮进倒计时态」
+        if timeout_sec > login.CODE_SEND_CONFIRM_SEC:
+            return bool(predicate())
+        return button_goes_away
+
+    def _press(_node):
+        clicks.append(1)
+        return press_ok
+
+    exc = None
+    with (
+        mock.patch.object(login, "_by_aid", return_value=mock.Mock()),
+        mock.patch.object(login, "_press_button", side_effect=_press),
+        mock.patch.object(login, "wait_until", side_effect=_wait),
+        mock.patch.object(login.time, "sleep"),
+        mock.patch.object(login.time, "time", side_effect=_now),
+    ):
+        try:
+            login.request_forgot_sms(1, "13800000000")
+        except login.LaunchError as caught:
+            exc = caught
+    return len(clicks), exc
+
+
+@pytest.mark.unit
+def test_forgot_sms_retries_instead_of_giving_up_after_one_click():
+    """**核心行为**：按钮没进倒计时态就再点，别一次判死（服务端冷却常为 60s）。"""
+    clicks, exc = _forgot_send(button_goes_away=False)
+    assert clicks > 1, f"只点了一次就放弃（第二程必然失败）：{clicks}"
+    assert exc is not None, "点不生效时必须抛错，不能当成功返回"
+    assert "连点" in str(exc) and "超限" in str(exc), f"报错丢了限流口径：{exc}"
+
+
+@pytest.mark.unit
+def test_forgot_sms_clicks_only_once_when_the_button_goes_to_countdown():
+    """**关键保护**：点中就立刻返回 —— 多点一次就多发一条短信，把测试号推向限流。"""
+    clicks, exc = _forgot_send(button_goes_away=True)
+    assert exc is None
+    assert clicks == 1, f"按钮都进倒计时态了还点 {clicks} 次"
+
+
+@pytest.mark.unit
+def test_forgot_sms_says_unclickable_is_not_a_rate_limit():
+    """**关键保护**：一次都点不动 ≠ 限流，排查方向相反，报错必须分开。
+
+    限流的表现是「点得动、按钮不消失」（服务端拒绝）；一次都点不动是控件/UIA 的事。
+    混成一句会让人拿着"换号/等冷却"去处理一个点不动的问题。
+    """
+    _clicks, exc = _forgot_send(button_goes_away=False, press_ok=False)
+    assert exc is not None
+    assert "点不动" in str(exc)
+    assert "超限" not in str(exc), f"点不动被说成了限流：{exc}"
+
+
 # ---------- 绑定弹窗：重试时不许把弹窗关掉 ----------
 
 
