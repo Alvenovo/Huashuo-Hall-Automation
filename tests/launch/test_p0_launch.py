@@ -3,18 +3,14 @@ from __future__ import annotations
 import pytest
 
 from hall_auto.launch import LaunchError, launch_until_ready
-from hall_auto.product import read_installed, stop_main_process
+from hall_auto.product import stop_main_process
 
 
 pytestmark = [pytest.mark.launch, pytest.mark.smoke]
 
 
-@pytest.fixture
-def installed():
-    info = read_installed()
-    if info is None or not info.exe_path.is_file():
-        pytest.skip("本机未安装华硕大厅")
-    return info
+# `installed` 守卫**不在这里定义** —— 用 `tests/launch/conftest.py` 那份共享的。
+# 2026-09-28 之前本模块自己抄了一份、另外 4 个模块没抄，于是新机上吐了 22 条 ERROR。
 
 
 def test_p0_03_launch_window(cfg, installed):

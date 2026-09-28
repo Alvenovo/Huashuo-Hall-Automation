@@ -17,7 +17,6 @@ import pytest
 
 from hall_auto import security
 from hall_auto.config import load_config
-from hall_auto.product import read_installed
 
 pytestmark = pytest.mark.security
 
@@ -59,17 +58,24 @@ def test_personal_storage_all_signed(cfg):
     assert result.unsigned_count == 0, f"个人空间盘存在未签名文件: {result.unsigned_files}"
 
 
-def test_control_panel_info(cfg):
+def test_control_panel_info(cfg, installed):
+    """控制面板里的卸载条目必须与已装大厅一致。
+
+    需要 `installed` 守卫：本用例验的是**已装大厅在控制面板里的呈现**，
+    没装时 `hall_entries` 必然返回空（2026-09-28 实测：74 条卸载表条目里
+    按不存在的名字筛得 0 条），`assert hall` 会红 —— 那是**假红**，不是缺陷。
+    套件的其余用例（签名/签章）只解包，不需要已装，所以守卫只加在这一条上。
+    """
     entries = security.control_panel_entries()
     hall = security.hall_entries(entries, cfg.display_name_contains)
     assert hall, "控制面板里没有大厅条目"
     publisher = security.expected_publisher()
     wrong = [f"{e['key']}={e['Publisher']!r}" for e in hall if (e.get("Publisher") or "") != publisher]
     assert not wrong, f"发布者不是{publisher}: {wrong}"
-    installed = read_installed()
-    if installed is not None:
-        versions = {e.get("DisplayVersion") for e in hall}
-        assert installed.display_version in versions, f"控制面板版本 {versions} 与已装 {installed.display_version} 不一致"
+    versions = {e.get("DisplayVersion") for e in hall}
+    assert installed.display_version in versions, (
+        f"控制面板版本 {versions} 与已装 {installed.display_version} 不一致"
+    )
     space_disk = [e["key"] for e in entries if "个人空间盘" in (e.get("DisplayName") or "")]
     assert not space_disk, f"控制面板不应出现个人空间盘信息: {space_disk}"
 

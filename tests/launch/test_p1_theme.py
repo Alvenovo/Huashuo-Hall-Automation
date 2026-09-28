@@ -33,7 +33,7 @@ class Session:
 
 
 @pytest.fixture(scope="module")
-def session(cfg):
+def session(cfg, installed):
     app = start_fresh(cfg)
     main = wait_main_window(app, cfg)
     wait_until_ready(cfg, main)

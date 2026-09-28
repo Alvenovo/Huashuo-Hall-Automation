@@ -184,7 +184,11 @@ SUITES: dict[str, Suite] = {
         paths=("tests/launch/test_p2_security.py",),
         marker=MARKER_SECURITY,
         parallel="full",
-        needs="config.local.yaml 的 security.tools_dir 指向内部工具本地副本；缺则 skip",
+        needs=(
+            "config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）；"
+            "控制面板那条（test_control_panel_info）另需**本机已装大厅**，"
+            "未装则那条 skip、其余照跑（2026-09-28 补：原来没守卫，新机上会红）"
+        ),
     ),
     "wb": Suite(
         name="wb",

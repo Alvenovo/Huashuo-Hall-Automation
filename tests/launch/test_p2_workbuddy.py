@@ -31,7 +31,6 @@ from hall_auto.launch import concrete_main, start_fresh, wait_main_window, wait_
 from hall_auto.product import (
     agreement_config_path,
     read_agreen,
-    read_installed,
     set_agreen,
     stop_main_process,
 )
@@ -46,10 +45,7 @@ WB_INSTALL_TIMEOUT = 180
 
 
 @pytest.fixture(scope="module")
-def hall(cfg):
-    info = read_installed()
-    if info is None or not info.exe_path.is_file():
-        pytest.skip("本机未安装华硕大厅")
+def hall(cfg, installed):
     app = start_fresh(cfg)
     spec = wait_main_window(app, cfg)
     wait_until_ready(cfg, spec)
@@ -320,9 +316,15 @@ CANCEL_BUTTON = "取消"
 FIRST_RUN_TAGS_DONE = "我选好了"
 
 
-def _launch_unagreed(cfg) -> int:
-    """把 Agreen 置 0 后直接起大厅（不走 wait_until_ready，避免自动点同意），返回 pid。"""
-    info = read_installed()
+def _launch_unagreed(cfg, info) -> int:
+    """把 Agreen 置 0 后直接起大厅（不走 wait_until_ready，避免自动点同意），返回 pid。
+
+    `info` 必须是**已经过 `installed` 守卫**的 `read_installed()` 结果 ——
+    2026-09-28 之前这里自己又调了一次 `read_installed()` 且**没判 None**，
+    未安装时直接 `AttributeError: 'NoneType' object has no attribute 'exe_path'`，
+    表现为一条 FAILED（既不是 skip 也不是干净失败）。守卫交给调用方，
+    和 `hall_auto/launch.py::start_fresh` 的写法保持一致。
+    """
     stop_main_process(cfg.timeouts.process_stop_sec)
     time.sleep(1)
     set_agreen("0")
@@ -395,7 +397,7 @@ def _dismiss_first_run_tags(pid: int, title: str) -> bool:
     return False
 
 
-def test_wb_entry_gated_by_privacy_agreement(cfg):
+def test_wb_entry_gated_by_privacy_agreement(cfg, installed):
     """行 24：隐私协议（首跑未同意）态下 WB 入口行为。
 
     探针实测（reports/probe/wb24_agreement_probe.py）：把 user.config 的 Agreen 置 0
@@ -418,7 +420,7 @@ def test_wb_entry_gated_by_privacy_agreement(cfg):
     original_agreen = read_agreen()
     pid = None
     try:
-        pid = _launch_unagreed(cfg)
+        pid = _launch_unagreed(cfg, installed)
         main = _main_wrapper(pid, cfg.display_name_contains, cfg.timeouts.launch_sec)
         assert main is not None, "未同意态下主窗口未出现"
 

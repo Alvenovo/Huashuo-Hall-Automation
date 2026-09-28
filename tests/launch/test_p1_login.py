@@ -93,7 +93,7 @@ def _bind_phone_if_prompted(cfg, pid) -> str:
 
 
 @pytest.fixture(scope="module")
-def ready_pid(cfg):
+def ready_pid(cfg, installed):
     """登录弹窗/用户菜单会顶掉主窗口句柄，所以趁窗口健康时记下 pid，后面一律按进程找控件。"""
     app = start_fresh(cfg)
     main = wait_main_window(app, cfg)

@@ -36,7 +36,7 @@ INVALID_CASES = [
 
 
 @pytest.fixture(scope="module")
-def register_pid(cfg):
+def register_pid(cfg, installed):
     app = start_fresh(cfg)
     main = wait_main_window(app, cfg)
     wait_until_ready(cfg, main)

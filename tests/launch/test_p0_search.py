@@ -11,7 +11,7 @@ pytestmark = [pytest.mark.launch, pytest.mark.smoke]
 
 
 @pytest.fixture(scope="module")
-def ready_main(cfg):
+def ready_main(cfg, installed):
     app = start_fresh(cfg)
     main = main_window(app, cfg.display_name_contains, cfg.timeouts.launch_sec)
     wait_until_ready(cfg, main)

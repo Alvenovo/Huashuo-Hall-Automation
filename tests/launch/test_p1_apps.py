@@ -37,7 +37,7 @@ from hall_auto.winapi import occlusion_hint, window_state_facts
 
 
 @pytest.fixture(scope="module")
-def ready_main(cfg):
+def ready_main(cfg, installed):
     app = start_fresh(cfg)
     main = wait_main_window(app, cfg)
     wait_until_ready(cfg, main)
@@ -150,10 +150,14 @@ def _occlusion_suffix(pid: int) -> str:
 
 @pytest.mark.apps
 @pytest.mark.login
-def test_sync_list_logged_in(cfg):
+def test_sync_list_logged_in(cfg, installed):
     """登录后同步列表能刷出「其他电脑已装应用」。只读断言：
     页底「全部安装」（InstallAllBtn）和条目安装会真装 QQ/网盘这类日常软件，绝不点。
-    自带起停（start_fresh 会顶掉 ready_main 的进程），所以放在本模块最后。"""
+    自带起停（start_fresh 会顶掉 ready_main 的进程），所以放在本模块最后。
+
+    ⚠️ 本用例**不走** `ready_main` 夹具，所以必须自己带 `installed` 守卫 ——
+    2026-09-28 之前没有，未安装的机器上会抛 `LaunchError` 而不是 skip。
+    """
     user, password = cfg.test_account()
     if not user or not password:
         pytest.skip("同步列表要登录：设 HALL_TEST_USER / HALL_TEST_PASSWORD")
