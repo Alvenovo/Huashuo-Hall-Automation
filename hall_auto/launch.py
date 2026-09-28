@@ -18,6 +18,7 @@ from hall_auto.winapi import (
     _hwnd_visible,
     _top_hwnds,
     ensure_window_shown,
+    occlusion_hint,
 )
 
 REPORTS_DIR = REPO_ROOT / "reports" / "launch"
@@ -50,6 +51,27 @@ def is_whitelisted(name: str, settings: LaunchSettings) -> bool:
 def prefer_dismiss(name: str, settings: LaunchSettings) -> bool:
     text = popup_text(name)
     return any(key and key in text for key in settings.update_or_card_keywords)
+
+
+def is_loading(name: str, settings: LaunchSettings) -> bool:
+    """加载态过渡窗（实测叫 `Splash`）—— **既不该点，也不该判死**。
+
+    2026-09-28 实测（控制机）：大厅加载页面时会弹一个 **20×20、屏幕正中**的
+    顶层窗，名字就是 `Splash`。它**不是**需要人去处理的弹窗：
+
+    - 点它没有意义（没有按钮），
+    - 判死更糟 —— 报出「未知弹窗: ['Splash']」会把排查方向带到「去找这个弹窗」，
+      而真因是**页面根本没加载出来**（窗口被遮挡 → WebView2 暂停渲染，坑 15）。
+
+    所以这一类只等，等到 `ready_sec` 超时再失败；那时报错里带上遮挡诊断，
+    指向真因。
+
+    ⚠️ 另一处同类逻辑是 `dismiss_pre_main_popups`（等主窗口之前那圈），
+    **这次没加**：`Splash` 只在主窗口起来之后才出现，那里够不着它。
+    将来若在那边也放行白名单弹窗，记得一并看这里。
+    """
+    text = popup_text(name)
+    return any(key and key in text for key in settings.loading_popup_keywords)
 
 
 def _save_screenshot(wrapper, stem: str) -> Path | None:
@@ -223,6 +245,9 @@ def dismiss_whitelist_popups(overlays, settings: LaunchSettings) -> None:
     for overlay in overlays:
         name = overlay.name
         first_run = overlay.first_run
+        if is_loading(name, settings):
+            # 加载态没有可点的东西；点它只会白等一轮（每轮 dismiss 里 sleep 1s）
+            continue
         if not (is_whitelisted(name, settings) or first_run):
             continue
         if prefer_dismiss(name, settings) and not first_run:
@@ -235,7 +260,11 @@ def dismiss_whitelist_popups(overlays, settings: LaunchSettings) -> None:
 
 
 def is_unknown(overlay: Overlay, settings: LaunchSettings) -> bool:
-    return not (is_whitelisted(overlay.name, settings) or overlay.first_run)
+    return not (
+        is_whitelisted(overlay.name, settings)
+        or overlay.first_run
+        or is_loading(overlay.name, settings)
+    )
 
 
 def _back_if_subpage(main) -> bool:
@@ -420,6 +449,27 @@ def start_fresh(cfg: Config) -> Application:
     return connect_app(cfg.timeouts.launch_sec)
 
 
+def _occlusion_note(pid: int | None) -> str:
+    """取「大厅是不是被挡住了」这一句依据；没被挡返回空串。
+
+    ⚠️ **必须在 `_save_screenshot()` 之前调用** —— 截图会 `set_focus()` 把大厅提到前台，
+    之后再量遮挡，量到的是**我们自己刚造出来的**"没被挡住"，真因当场被抹掉。
+    2026-09-28 实付：同一条失败，先截图那轮报「窗口可见、未被遮挡」，
+    先量再截图那轮才报出「被 WorkBuddy AI 挡住」。
+    """
+    if not pid:
+        return ""
+    return occlusion_hint(pid)
+
+
+def _with_hint(message: str, hint: str) -> str:
+    """把遮挡依据拼到结论后面 —— 这是「控件读得到、页面却空白」的头号真因。
+
+    **结论必须跟依据一起给**，否则人只能在报错和截图之间反复猜（09-23 的老教训）。
+    """
+    return f"{message}｜遮挡诊断：{hint}" if hint else message
+
+
 def wait_until_ready(cfg: Config, main) -> LaunchResult:
     settings = cfg.launch
     # handle / pid 是不变量，但 UIA 每次取要 ~1s（实测），就绪循环每轮都跑覆盖层
@@ -439,9 +489,11 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
         dismiss_whitelist_popups(overlays, settings)
         unknown = [o.name for o in overlays if is_unknown(o, settings)]
         if unknown:
+            # 依据先取：截图会 set_focus，把大厅提到前台后就量不出遮挡了
+            hint = _occlusion_note(pid)
             evidence = _save_screenshot(main, "unknown_popup")
             raise LaunchError(
-                f"未知弹窗: {unknown}；截图: {evidence}",
+                _with_hint(f"未知弹窗: {unknown}；截图: {evidence}", hint),
                 evidence=evidence,
             )
         if overlays:
@@ -459,12 +511,16 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
                 structure_ids=tuple(settings.required_auto_ids),
             )
         time.sleep(0.5)
+    hint = _occlusion_note(pid)
     evidence = _save_screenshot(main, "not_ready")
     present, web = _structure(main, settings)
     missing = [aid for aid in settings.required_auto_ids if aid not in present]
     leftover = [o.name for o in _overlay_windows(main, settings, main_handle=main_handle, pid=pid)]
     raise LaunchError(
-        f"超时未就绪 missing={missing} webview={web} overlays={leftover}；截图: {evidence}",
+        _with_hint(
+            f"超时未就绪 missing={missing} webview={web} overlays={leftover}；截图: {evidence}",
+            hint,
+        ),
         evidence=evidence,
     )
 

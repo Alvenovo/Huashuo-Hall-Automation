@@ -38,6 +38,10 @@ class LaunchSettings:
         "欢迎使用",
     )
     update_or_card_keywords: tuple[str, ...] = ("启动卡片", "更新")
+    # 加载态过渡窗：**既不该点、也不该判死**，等它自己消失。
+    # 2026-09-28 实测：大厅在加载中会弹一个 20×20、屏幕正中的顶层窗，名字就叫 `Splash`。
+    # 它不是「未知弹窗」—— 页面没加载完时它一直在，判死只会报出错误的排查方向。
+    loading_popup_keywords: tuple[str, ...] = ("Splash",)
     dismiss_buttons: tuple[str, ...] = ("关闭", "取消", "稍后", "以后再说", "我知道了")
     accept_buttons: tuple[str, ...] = ("同意", "确定", "允许", "是")
 
@@ -267,6 +271,7 @@ def load_config(path: Path | None = None) -> Config:
             update_or_card_keywords=_tuple(
                 "update_or_card_keywords", ("启动卡片", "更新")
             ),
+            loading_popup_keywords=_tuple("loading_popup_keywords", ("Splash",)),
             dismiss_buttons=_tuple(
                 "dismiss_buttons", ("关闭", "取消", "稍后", "以后再说", "我知道了")
             ),
