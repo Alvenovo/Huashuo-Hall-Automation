@@ -125,7 +125,8 @@ POLL_SECONDS = 30
 ELEVATION_TIMEOUT_SECONDS = 4 * 3600
 ELEVATION_POLL_SECONDS = 5
 # 触发后等「提权侧真起来」的窗口。wrapper 被拉起到写第一行 log 是秒级的事，
-# 给 60s 足够宽裕；等不到就是计划任务没真跑（动作指向坏了 / venv 没了 / 任务被禁用），
+# 给 60s 足够宽裕；等不到就是计划任务没真跑（**笔记本拔电、任务「不用电池启动」只排队**
+# —— 2026-09-29 实测卡了一整天 / 动作指向坏了 / venv 没了 / 任务被禁用），
 # 早失败远好过进上面那个 4 小时轮询空等（见 run_suite_elevated 里的 wait_elevated_started）。
 ELEVATION_START_TIMEOUT_SECONDS = 60
 # 等待期间的心跳间隔。**不能静默等** —— 提权段几分钟没有输出，
@@ -446,9 +447,14 @@ def run_suite_elevated(
         detail = (
             f"⚠ 提权通道触发返回成功，但 {ELEVATION_START_TIMEOUT_SECONDS}s 内提权侧毫无动静"
             f"（wrapper.log / elevated_run.log 没更新、result.json 没出现）—— 计划任务没真跑起来。\n"
-            f"  排查：① 计划任务动作指向对不对（schtasks /Query /TN {ELEVATION_TASK_NAME} /XML，"
-            "应指向 tools\\run_elevated_suite.ps1）；② .venv\\Scripts\\python.exe 在不在；"
-            "③ 任务是不是被禁用/改成非提权；④ 修复后用管理员重跑 tools\\bootstrap_machine.ps1（幂等）。"
+            f"  排查：① **节点是笔记本且拔着电？** 任务默认「不用电池启动」，拔电时只排队、不执行"
+            f"（/Run 仍返回 0，别被骗）—— 插上电，或管理员 PowerShell 关门禁："
+            f"$s=(Get-ScheduledTask {ELEVATION_TASK_NAME}).Settings;$s.DisallowStartIfOnBatteries=$false;"
+            f"$s.StopIfGoingOnBatteries=$false;Set-ScheduledTask {ELEVATION_TASK_NAME} -Settings $s"
+            "（重跑 tools\\bootstrap_machine.ps1 也会自动关，幂等）；"
+            f"② 动作指向对不对（schtasks /Query /TN {ELEVATION_TASK_NAME} /XML，"
+            "应指向 tools\\run_elevated_suite.ps1）；③ .venv\\Scripts\\python.exe 在不在；"
+            "④ 任务是不是被禁用/改成非提权。"
         )
         print(f"  {detail}", file=sys.stderr, flush=True)
         _append_log(log_path, f"[{_beat_stamp()}] {detail}")

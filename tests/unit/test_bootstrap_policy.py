@@ -272,6 +272,69 @@ def test_schtask_needs_admin(bm):
     assert any("管理员" in line for line in st.detail)
 
 
+def test_schtask_clears_battery_gate_on_create(bm):
+    """建完任务必须关电池门禁 —— 否则笔记本拔电时任务只排队、/Run 返回 0 但动作不跑。
+
+    2026-09-29 实测：`schtasks /Create` 默认 `DisallowStartIfOnBatteries=True`，
+    提权段卡死一整天。修法只能用 `Set-ScheduledTask` 把两个电池属性改成 `$false`。
+    """
+    with mock.patch.object(bm, "_task_action", return_value=""), \
+         mock.patch.object(bm, "is_admin", return_value=True), \
+         mock.patch.object(bm.subprocess, "run", return_value=_fake_run()) as run:
+        st = bm.step_schtask(False)
+
+    assert st.ok
+    calls = " ".join(str(c) for c in run.call_args_list)
+    assert "Set-ScheduledTask" in calls, "建完要调 Set-ScheduledTask 关门禁"
+    assert "DisallowStartIfOnBatteries=$false" in calls
+    assert "StopIfGoingOnBatteries=$false" in calls
+    assert any("电池门禁已关" in line for line in st.detail)
+
+
+def test_schtask_clears_battery_gate_even_when_skipping_recreate(bm):
+    """已存在且指向本仓库脚本 -> 不重建，但**照样关一次电池门禁**。
+
+    只改 Settings 不动触发器，不会重置触发时间；这样老 bootstrap 建出的门禁任务
+    重跑本脚本也能修好，而不是"跳过不管、坑还在"。
+    """
+    ps = "power" + "shell"
+    xml = (
+        f"<Command>{ps}</Command>"
+        f"<Arguments>-File {bm.REPO_ROOT}/tools/run_elevated_suite.ps1</Arguments>"
+    )
+    with mock.patch.object(bm, "_task_action", return_value=xml), \
+         mock.patch.object(bm, "is_admin", return_value=True), \
+         mock.patch.object(bm.subprocess, "run", return_value=_fake_run()) as run:
+        st = bm.step_schtask(False)
+
+    assert st.ok
+    assert not any("Create" in str(c) for c in run.call_args_list), "不应重建"
+    calls = " ".join(str(c) for c in run.call_args_list)
+    assert "Set-ScheduledTask" in calls, "跳过重建也要关电池门禁"
+    assert "DisallowStartIfOnBatteries=$false" in calls
+
+
+def test_schtask_battery_gate_failure_warns_but_does_not_fail(bm):
+    """关门禁失败（如非真提权 -> 拒绝访问）只警告、不判死整台机器铺设。
+
+    任务插电时照常能跑；但要把"笔记本拔电会卡死"和手工修法写进日志，别静默。
+    """
+    def _run(cmd, **kwargs):
+        text = cmd if isinstance(cmd, str) else " ".join(map(str, cmd))
+        if "Set-ScheduledTask" in text:
+            return _fake_run(returncode=1, stderr="拒绝访问 0x80070005")
+        return _fake_run()
+
+    with mock.patch.object(bm, "_task_action", return_value=""), \
+         mock.patch.object(bm, "is_admin", return_value=True), \
+         mock.patch.object(bm.subprocess, "run", side_effect=_run):
+        st = bm.step_schtask(False)
+
+    assert st.ok, "关门禁失败不该把整步判死"
+    assert any("⚠" in line and "电池门禁" in line for line in st.detail)
+    assert any("拒绝访问" in line for line in st.detail), "失败原因要带出来"
+
+
 def test_task_action_returns_empty_when_query_fails(bm):
     """查询失败（任务不存在 / 权限不足）返回空串，不抛异常。"""
     with mock.patch.object(bm.subprocess, "run", return_value=_fake_run(returncode=1, stderr="找不到")):

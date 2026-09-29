@@ -1558,6 +1558,55 @@ def _task_action(task: str) -> str:
     return proc.stdout or ""
 
 
+def _clear_battery_gate(task: str) -> tuple[bool, str]:
+    """关掉计划任务的电池门禁，返回 (成功?, 失败原因)。
+
+    ## 为什么必须有这一步（2026-09-29 实测坑，卡了整整一天）
+
+    `schtasks /Create` **不暴露**电池开关，建出来的任务默认就是
+    `DisallowStartIfOnBatteries=True` + `StopIfGoingOnBatteries=True`。
+    节点是笔记本、**拔着电**跑批时，任务调度器直接拒绝启动它：
+    `schtasks /Run` 照样返回 0（那只代表"请求已接受"，不代表"任务已启动"），
+    但动作永不执行，任务卡在「模式: 已排队」。表现就是提权段「进行中」到天荒地老
+    —— farm_agent 现在 60s fail-fast 会把它点出来，但**根因在这条默认设置**。
+
+    只能用 PowerShell 的 `Set-ScheduledTask` 修：取出**现有** Settings 对象、
+    只把这两个电池属性改成 `$false` 再写回。这样触发器 / 动作 / 运行级别全不动，
+    **不重置触发时间**，幂等安全 —— 所以连「已存在就跳过」那条分支里也能放心调
+    （老任务被门禁卡住时，重跑 bootstrap 也能顺手修好，而不是跳过不管）。
+    """
+    cmd = (
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
+        f"$s=(Get-ScheduledTask -TaskName '{task}').Settings;"
+        "$s.DisallowStartIfOnBatteries=$false;"
+        "$s.StopIfGoingOnBatteries=$false;"
+        f"Set-ScheduledTask -TaskName '{task}' -Settings $s | Out-Null\""
+    )
+    proc = _run_text(cmd, shell=True, check=False)
+    if proc.returncode != 0:
+        return False, (proc.stdout or proc.stderr or "").strip()[:300]
+    return True, ""
+
+
+def _ensure_battery_gate_off(st: "Step", task: str) -> None:
+    """关电池门禁并把结果写进步骤日志。**关不上只警告、不判死**。
+
+    不判死的理由：任务在**插电**时照常能跑，为这个把整台机器的铺设判死太重；
+    但笔记本拔电跑批会中招，所以失败时给一条能直接粘到管理员 PowerShell 的手工修法。
+    """
+    ok, why = _clear_battery_gate(task)
+    if ok:
+        st.log(f"电池门禁已关（{task} 拔电也能跑；只改 Settings，不动触发器）")
+        return
+    st.log(
+        f"⚠ 关电池门禁失败：{why or '未知原因'} —— 若本节点是笔记本且**拔电**跑批，"
+        "提权段会卡在「已排队」永不执行（`schtasks /Run` 仍返回 0，别被骗）。"
+        f"手工修（管理员 PowerShell）：$s=(Get-ScheduledTask {task}).Settings;"
+        f"$s.DisallowStartIfOnBatteries=$false;$s.StopIfGoingOnBatteries=$false;"
+        f"Set-ScheduledTask {task} -Settings $s"
+    )
+
+
 def step_schtask(skip: bool) -> Step:
     """提权计划任务：**已存在且指向同一脚本就跳过**，不无脑重建。
 
@@ -1574,6 +1623,17 @@ def step_schtask(skip: bool) -> Step:
     **旧任务必须重建**，否则新代码触发了它，它还是去跑老的 `run_p1_apps.ps1`——
     表现是「提权段一直没结果」，而节点侧看起来只是慢。所以检测到旧动作时
     这里**主动覆盖**，并把原因写进日志（默认那条"不重建"的规则让位给正确性）。
+
+    ## 2026-09-29：建完必须关电池门禁（`_ensure_battery_gate_off`）
+
+    `schtasks /Create` 不暴露电池开关，建出来的任务默认 `DisallowStartIfOnBatteries=True`。
+    节点是笔记本、拔电跑批时调度器**拒绝启动**它：`/Run` 仍返回 0，动作永不执行，
+    提权段卡死（当天实测卡了一整天，详见 `_clear_battery_gate` 的 docstring）。
+    所以**建完**要用 `Set-ScheduledTask` 把两个电池属性关掉。
+
+    同理，上面「已存在就跳过重建」那条分支也**照样关一次** —— 只改 Settings 不动触发器，
+    不会重置触发时间；这样一台被老 bootstrap 建出门禁的任务，重跑本脚本也能顺手修好，
+    而不是"跳过不管、坑还在"。
     """
     st = Step("提权计划任务")
     if skip:
@@ -1591,7 +1651,8 @@ def step_schtask(skip: bool) -> Step:
         decoded = xml.replace("&amp;", "&")
         # 只认「这个任务的 Command/Arguments 里出现了本仓库的脚本路径」
         if script.name in decoded and str(REPO_ROOT) in decoded:
-            st.log(f"任务 {task} 已存在且指向本仓库脚本，跳过（覆盖会重置触发时间）")
+            st.log(f"任务 {task} 已存在且指向本仓库脚本，跳过重建（覆盖会重置触发时间）")
+            _ensure_battery_gate_off(st, task)
             st.log(f"触发：MSYS_NO_PATHCONV=1 schtasks /Run /TN {task}")
             st.log(f"要强制重建：先 schtasks /Delete /TN {task} /F 再重跑本脚本")
             return st
@@ -1618,6 +1679,7 @@ def step_schtask(skip: bool) -> Step:
         st.fail(f"建任务失败 rc={proc.returncode}: {(proc.stdout or proc.stderr or '')[:300]}")
     else:
         st.log(f"任务 {task} 已建（/RL HIGHEST，动作跑 {script.name}）")
+        _ensure_battery_gate_off(st, task)
         st.log(f"触发：MSYS_NO_PATHCONV=1 schtasks /Run /TN {task}")
     return st
 
