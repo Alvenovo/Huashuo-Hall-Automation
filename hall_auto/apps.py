@@ -21,7 +21,7 @@ from pathlib import Path
 
 from hall_auto.config import Config
 from hall_auto.launch import HOME_TAB_NAME, LaunchError, _press_button, popup_text
-from hall_auto.product import is_admin
+from hall_auto.product import is_admin, stop_images
 from hall_auto.search import open_detail_until_ready, search_hits
 from hall_auto.waiting import wait_until, wait_until_or_raise
 from hall_auto.winapi import (
@@ -618,12 +618,48 @@ def dump_wizard_windows(app_name: str = "", path: Path = WIZARD_DUMP, append: bo
     return path
 
 
+# 夹具应用「正在运行」时会锁住自己安装目录里的文件：网易云的 icudtl.dat 是它运行时
+# 加载的，注册表卸干净但进程还活着时，安装器一覆盖就写不进去，弹 NSIS 的
+# 「不能打开要写入的文件」模态框等人工 —— 无人值守直接干等到超时
+# （2026-09-29 新测试机真踩）。装之前必须先把应用进程收干净。
+# 键是配置里的夹具名（子串互认），值是进程映像名（不带 .exe）。
+FIXTURE_PROC_HINTS: dict[str, tuple[str, ...]] = {
+    "网易云音乐": ("cloudmusic",),
+}
+
+
+def fixture_proc_hints(app_name: str) -> tuple[str, ...]:
+    """这个夹具应用跑起来时的进程映像名；没登记过的返回空（不猜、不误杀）。"""
+    for key, hints in FIXTURE_PROC_HINTS.items():
+        if key and app_name and (key in app_name or app_name in key):
+            return hints
+    return ()
+
+
+def kill_fixture_app_procs(app_name: str, timeout_sec: int = 15) -> None:
+    """装夹具前把它正在运行的进程收干净；收不掉就**立刻报错**，不留到安装期卡模态框。"""
+    hints = fixture_proc_hints(app_name)
+    if not hints:
+        return
+    leftover = stop_images(list(hints), timeout_sec=timeout_sec)
+    if leftover:
+        raise LaunchError(
+            f"P1-A：夹具应用 {app_name} 的进程 {leftover} 杀不掉（可能提权或卡死）。"
+            "它运行时会锁住安装目录文件（网易云的 icudtl.dat），安装器写不进去会弹"
+            "「不能打开要写入的文件」模态框，把无人值守卡到超时。"
+            f"先在管理员终端 taskkill /F /IM {leftover[0]}.exe /T 再跑。"
+        )
+
+
 def install_fixture(cfg: Config, main, app_name: str, timeout_sec: int | None = None) -> str:
     """从商店装夹具应用，装没装成只看注册表 DisplayName，不看截图。"""
     if not app_name:
         raise LaunchError("P1-A：没配安装夹具应用")
     if not is_admin():
         raise LaunchError(NEED_ADMIN_HINT)
+    # 先收应用进程再查「向导还挂着/已安装」：进程在跑不代表注册表有条目，
+    # 漏了这步就会在安装期撞文件锁弹模态框（见 FIXTURE_PROC_HINTS 注释）。
+    kill_fixture_app_procs(app_name)
     if installer_dialogs(app_name):
         raise LaunchError(
             f"P1-A：上一轮的厂商安装向导还挂着（{wizard_snapshot(app_name)}），先关掉再跑。"

@@ -322,6 +322,28 @@ def _kill_image(name: str) -> None:
         subprocess.run(args, capture_output=True, check=False)
 
 
+def stop_images(stems: list[str], timeout_sec: int = 30) -> list[str]:
+    """反复 taskkill 直到这些映像都不在跑；返回超时后**仍在跑**的（空 = 全收干净）。
+
+    给「装/卸某个第三方应用前先把它的进程收干净」用：应用运行时会锁住自己安装目录里
+    的文件，安装器写不进去就弹模态框等人工，无人值守会干等到超时。大小写不敏感，
+    带不带 `.exe` 都认。
+    """
+    wanted = [s.lower().removesuffix(".exe") for s in stems if s]
+    if not wanted:
+        return []
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        running = {n.lower() for n in _running_image_names()} & set(wanted)
+        if not running:
+            return []
+        for name in sorted(running):
+            _kill_image(name)
+        time.sleep(1)
+    running = {n.lower() for n in _running_image_names()} & set(wanted)
+    return sorted(running)
+
+
 def stop_main_process(timeout_sec: int = 30) -> None:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:

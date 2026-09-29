@@ -242,6 +242,9 @@ def _stub_install_fixture(monkeypatch, hits, *, detail_action="安装"):
     cfg = load_config()
     seen: dict = {}
     monkeypatch.setattr(apps, "is_admin", lambda: True)
+    # 杀进程这条必须挡掉：不挡单测会真去 tasklist/taskkill，
+    # 开发机上万一真跑着网易云就会被误杀。它有自己的单测覆盖。
+    monkeypatch.setattr(apps, "kill_fixture_app_procs", lambda *a, **k: None)
     monkeypatch.setattr(apps, "installer_dialogs", lambda *a, **k: [])
     monkeypatch.setattr(apps, "is_app_installed", lambda *a, **k: False)
     monkeypatch.setattr(apps, "search_hits", lambda probe, main: list(hits))
@@ -300,3 +303,58 @@ def test_install_fixture_still_reports_a_real_miss(monkeypatch):
     with pytest.raises(apps.LaunchError) as exc:
         apps.install_fixture(cfg, main=object(), app_name="网易云音乐")
     assert "搜不到" in str(exc.value)
+
+
+# ---------- 夹具应用：装之前先收干净正在运行的进程 ----------
+#
+# 2026-09-29 新测试机真踩：注册表卸干净但网易云进程还活着，安装器覆盖它运行时加载的
+# icudtl.dat 撞锁，弹 NSIS「不能打开要写入的文件」模态框等人工，无人值守干等到超时。
+
+
+@pytest.mark.unit
+def test_fixture_proc_hints_maps_known_apps_only():
+    """只杀登记过的夹具进程；没登记的不猜、不误杀（返回空 = 不动手）。"""
+    assert apps.fixture_proc_hints("网易云音乐") == ("cloudmusic",)
+    # 商店名带后缀也要认得（子串互认）
+    assert apps.fixture_proc_hints("网易云音乐官方版") == ("cloudmusic",)
+    assert apps.fixture_proc_hints("7-Zip") == ()
+    assert apps.fixture_proc_hints("") == ()
+
+
+@pytest.mark.unit
+def test_kill_fixture_app_procs_fails_fast_when_unkillable(monkeypatch):
+    """杀不掉就**立刻报错**并给出人工命令，不留到安装期卡模态框。"""
+    monkeypatch.setattr(apps, "stop_images", lambda stems, timeout_sec: ["cloudmusic"])
+    with pytest.raises(apps.LaunchError) as exc:
+        apps.kill_fixture_app_procs("网易云音乐")
+    msg = str(exc.value)
+    assert "taskkill" in msg, f"报错里没给人工可执行的命令：{msg}"
+    assert "icudtl" in msg or "模态" in msg, f"没讲清为什么会卡：{msg}"
+
+
+@pytest.mark.unit
+def test_kill_fixture_app_procs_noop_for_unknown_app(monkeypatch):
+    called = []
+    monkeypatch.setattr(apps, "stop_images", lambda *a, **k: called.append(1) or [])
+    apps.kill_fixture_app_procs("7-Zip")
+    assert called == [], "没登记进程名的夹具不该去 taskkill（会误杀）"
+
+
+@pytest.mark.unit
+def test_install_fixture_kills_running_app_before_touching_the_store(monkeypatch):
+    """**关键保护**：install_fixture 开跑第一步就收应用进程，晚一步就撞文件锁。"""
+    order = []
+    monkeypatch.setattr(apps, "is_admin", lambda: True)
+
+    def _record(app_name, timeout_sec=15):
+        order.append(("kill", app_name))
+        raise RuntimeError("stop-here")
+
+    monkeypatch.setattr(apps, "kill_fixture_app_procs", _record)
+    monkeypatch.setattr(
+        apps, "installer_dialogs", lambda *a, **k: pytest.fail("杀进程必须排在查残留向导之前")
+    )
+
+    with pytest.raises(RuntimeError):
+        apps.install_fixture(load_config(), main=object(), app_name="网易云音乐")
+    assert order == [("kill", "网易云音乐")]
