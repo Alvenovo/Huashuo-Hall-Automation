@@ -422,3 +422,31 @@ def test_capture_false_writes_no_evidence_dir(tmp_path, fake_capture):
     assert rec.outcome == ev.OUTCOME_FAILED, "结论仍要记进 summary（省的是图，不是信息）"
     assert s.records == [rec]
 
+
+# ---------------- 报告默认把「有截图」的排前面（2026-09-29）----------------
+#
+# `--evidence=all` 下一轮报告里，600+ 条 unit 用例是 `capture=False`（无图），
+# 和十几条 UI 用例（有终态截图）按执行顺序混在一起。人工回看现场图要一路翻过
+# 几百行「无截图」。改成默认就把有图的排在最前面（组内仍按执行顺序），
+# 再配一个「只看有截图」筛选彻底隐藏无图的。
+
+
+def test_report_puts_cases_with_screenshots_first(tmp_path, fake_capture):
+    """有图的行排在无图的行前面，且各行带 data-img 标记 + 工具栏有「只看有截图」按钮。"""
+    s, run = _session(tmp_path, ev.MODE_FAILURE)
+    s.record(NODEID_OK, ev.OUTCOME_PASSED, 1.0, "assert True")   # failure-only：通过不留图
+    s.record(NODEID_BAD, ev.OUTCOME_FAILED, 2.0, "assert False") # 失败留图
+    s.finish()
+    summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+    # finish() 默认按 EVIDENCE_ROOT/<run名> 找图；测试 run 在 tmp_path 下，显式传 run_dir 才嵌得进去
+    html_text = ev._render_html(summary, run_dir=run)
+
+    assert 'data-f="img"' in html_text and "只看有截图" in html_text, (
+        "工具栏少了「只看有截图」按钮 —— 人工又得翻过几百行无图的 unit 用例"
+    )
+    # summary["cases"] 里通过那条在前；渲染后必须把有图（失败）那条排到前面
+    assert summary["cases"][0]["nodeid"] == NODEID_OK, "前提：录入顺序里无图的通过用例在前"
+    pos_img = html_text.index('data-img="1"')
+    pos_noimg = html_text.index('data-img="0"')
+    assert pos_img < pos_noimg, "有截图的行要默认排在无截图的行前面，省得人工翻页"
+    assert "r.dataset.img==='1'" in html_text, "筛选逻辑要按 data-img 过滤，别只看结果状态"

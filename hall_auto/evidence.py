@@ -245,7 +245,9 @@ _JS = """
   function apply(){
     const q=document.getElementById('q').value.trim().toLowerCase();
     rows.forEach(r=>{
-      const okF = filter==='all' || r.dataset.s===filter;
+      const okF = filter==='all' ? true
+                : filter==='img' ? r.dataset.img==='1'
+                : r.dataset.s===filter;
       const okQ = !q || r.dataset.text.toLowerCase().includes(q);
       r.style.display=(okF&&okQ)?'':'none';
     });
@@ -279,7 +281,7 @@ def _render_html(summary: dict, run_dir: Path | None = None) -> str:
     run_dir = run_dir or (EVIDENCE_ROOT / summary["run"])
     total = summary["total"] or 1
     rate = round(summary["passed"] / total * 100)
-    rows = []
+    decorated = []
     for c in summary["cases"]:
         outcome = c["outcome"]
         badge = {"passed": "通过", "failed": "失败", "error": "错误", "skipped": "跳过"}.get(outcome, outcome)
@@ -291,14 +293,18 @@ def _render_html(summary: dict, run_dir: Path | None = None) -> str:
         err = f'<div class="err">{html.escape(c["assertion"])}</div>' if (broken and c["assertion"]) else ""
         title_line = f'<div class="title">{html.escape(c["title"])}</div>' if c.get("title") else ""
         assert_line = f'<div class="assert">{html.escape(c["assertion"]) or "—"}</div>' if not broken else ""
-        rows.append(
-            f'<tr class="row-{outcome}" data-s="{outcome}" data-text="{html.escape(c["module"] + " " + c["case"] + " " + c.get("title", ""))}">'
+        row = (
+            f'<tr class="row-{outcome}" data-s="{outcome}" data-img="{1 if data_uri else 0}" '
+            f'data-text="{html.escape(c["module"] + " " + c["case"] + " " + c.get("title", ""))}">'
             f'<td><span class="badge {outcome}">{badge}</span></td>'
             f'<td><span class="mod">{html.escape(c["module"])}</span></td>'
             f'<td><div class="case">{html.escape(c["case"])}</div>{title_line}{assert_line}{err}</td>'
             f'<td class="dur">{c["duration_s"]}s</td>'
             f'<td>{img}</td></tr>'
         )
+        decorated.append((bool(data_uri), row))
+    # 有截图的排前面，方便人工直接看现场图；sorted 稳定，组内仍是执行顺序。
+    rows = [row for _has_img, row in sorted(decorated, key=lambda t: not t[0])]
     body_rows = "\n".join(rows) or '<tr><td colspan="5" class="noimg">本轮无用例</td></tr>'
     profile = summary.get("profile") or {}
     node = summary.get("node") or summary.get("machine") or "unknown"
@@ -342,6 +348,7 @@ def _render_html(summary: dict, run_dir: Path | None = None) -> str:
     <button class="btn" data-f="passed">只看通过</button>
     <button class="btn" data-f="failed">只看失败</button>
     <button class="btn" data-f="error">只看错误</button>
+    <button class="btn" data-f="img">只看有截图</button>
   </div>
   <table id="tbl">
     <thead><tr><th style="width:90px">结果</th><th style="width:90px">模块</th><th>用例 / 关键断言</th><th style="width:70px">耗时</th><th style="width:130px">终态截图</th></tr></thead>
