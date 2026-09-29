@@ -101,3 +101,40 @@ def test_keep_awake_for_process_is_idempotent():
         awake._watch_thread = None
         awake._watch_stop = awake.threading.Event()
         awake._watch_armed = False
+
+
+# ---------------- 交互态丢失去抖（UAC 安全桌面误杀回归锁）----------------
+#
+# 2026-09-29 的坑：装小硕知道触发 UAC 跳安全桌面，那一瞬 GetForegroundWindow() 为 NULL，
+# is_interactive_session() 判非交互。旧逻辑单次采样就 latch，_session_guard 在下个用例
+# 边界 pytest.exit 掉整轮 —— 一次 UAC 弹窗杀光整批。去抖后：瞬时闪断被吞，持续断连才 latch。
+
+def test_debouncer_swallows_a_single_blip():
+    """**核心回归锁**：一次非交互采样不许 latch —— 这正是 UAC 安全桌面那一瞬。"""
+    d = awake._SessionLossDebouncer(grace_sec=30)
+    assert d.observe(True, now=0.0) is False
+    assert d.observe(False, now=5.0) is False, "首次非交互只记起点，不该立即判丢失"
+    assert d.observe(True, now=10.0) is False, "交互态回来（点掉 UAC）→ 清零"
+    assert d.observe(False, now=15.0) is False, "再闪一下也不该 latch"
+
+
+def test_debouncer_latches_only_after_sustained_loss():
+    """持续非交互超过宽限期才 latch —— 真锁屏 / RDP 断连是**一直**非交互。"""
+    d = awake._SessionLossDebouncer(grace_sec=30)
+    assert d.observe(False, now=0.0) is False   # 起点
+    assert d.observe(False, now=15.0) is False  # 还没到宽限期
+    assert d.observe(False, now=29.0) is False  # 差一点
+    assert d.observe(False, now=30.0) is True, "满宽限期 → 判真丢失"
+
+
+def test_debouncer_resets_when_session_recovers():
+    """中途恢复交互态要清零计时：断断续续的非交互不该累积成一次丢失。"""
+    d = awake._SessionLossDebouncer(grace_sec=30)
+    d.observe(False, now=0.0)
+    d.observe(False, now=20.0)
+    assert d.observe(True, now=25.0) is False   # 恢复 → 清零
+    assert d.observe(False, now=40.0) is False  # 重新计起点，距上次恢复才 15s
+    assert d.observe(False, now=54.0) is False  # 距新起点 14s，仍不够
+    assert d.observe(False, now=70.0) is True, "距新起点满 30s 才 latch"
+
+

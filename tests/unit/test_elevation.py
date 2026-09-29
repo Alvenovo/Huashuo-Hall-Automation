@@ -241,3 +241,48 @@ def test_validate_rejects_a_bogus_evidence_value():
     for bad in ("--evidence=everything", "--evidence=", "--evidence=all --extra"):
         _args, reject = elevation.validate_pytest_args(["tests/install", "-v", bad])
         assert reject, f"该拒绝：{bad}"
+
+
+# ---------------- 提权侧「真起来了」验证 ----------------
+#
+# 钉的是 2026-09-29 那个坑：`schtasks /Run` 返回 0 只代表「请求被受理」，
+# 计划任务动作被改坏 / venv 缺失 / UAC 静默拒绝时提权侧一个字都不写，
+# agent 却以为已交棒，对着永远不会出现的 result.json 空等 4 小时。
+# 判据不能信 /Run 退出码，要看提权侧真动过。
+
+def test_elevated_started_false_when_nothing_changed(tmp_path):
+    """三处痕迹都没动 → 判「没起来」。这是让 agent 早失败、不空等 4 小时的核心。"""
+    snap = elevation.activity_snapshot(tmp_path)
+    assert elevation.elevated_started(snap, tmp_path) is False
+
+
+def test_elevated_started_true_when_result_appears(tmp_path):
+    """result.json 出现即算起来（幂等 / 非提权 / 校验失败都会写它）。"""
+    snap = elevation.activity_snapshot(tmp_path)
+    elevation.write_json(elevation.result_path(tmp_path), {"request_id": "R", "exit_code": 0})
+    assert elevation.elevated_started(snap, tmp_path) is True
+
+
+def test_elevated_started_true_when_wrapper_log_advances(tmp_path):
+    """wrapper.log 被写新内容即算起来 —— 它在 elevated_runner 之前就落第一行。"""
+    wrapper = elevation.wrapper_log_path(tmp_path)
+    wrapper.write_text("old line\n", encoding="utf-8")
+    import os as _os
+    _os.utime(wrapper, (1_000_000, 1_000_000))  # 压成很早的 mtime，好让基线落后
+    snap = elevation.activity_snapshot(tmp_path)
+    wrapper.write_text("old line\nnew line\n", encoding="utf-8")
+    assert elevation.elevated_started(snap, tmp_path) is True
+
+
+def test_wait_elevated_started_returns_true_as_soon_as_it_starts(tmp_path):
+    """轮询等待：一旦痕迹出现立刻返回 True，不必等满 timeout。"""
+    snap = elevation.activity_snapshot(tmp_path)
+    elevation.write_json(elevation.result_path(tmp_path), {"request_id": "R", "exit_code": 0})
+    assert elevation.wait_elevated_started(snap, timeout_sec=5, interval=0.01, root=tmp_path) is True
+
+
+def test_wait_elevated_started_times_out_when_silent(tmp_path):
+    """提权侧全程没动静 → 超时返回 False（agent 据此早失败）。"""
+    snap = elevation.activity_snapshot(tmp_path)
+    assert elevation.wait_elevated_started(snap, timeout_sec=0.05, interval=0.01, root=tmp_path) is False
+

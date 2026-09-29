@@ -711,6 +711,8 @@ def test_elevated_broker_polls_until_the_result_lands(root, monkeypatch, tmp_pat
         lambda **kw: (written.update(kw), "REQ-1")[1],
     )
     monkeypatch.setattr(farm_agent, "trigger_task", lambda: (True, "已触发"))
+    # 提权侧「真起来了」的检测另由 test_elevation.py 钉；这里只测轮询，直接判已起来。
+    monkeypatch.setattr(farm_agent, "wait_elevated_started", lambda *a, **k: True)
 
     def _fake_read_result(request_id: str) -> dict:
         calls["n"] += 1
@@ -745,6 +747,7 @@ def test_elevated_progress_lands_in_the_shared_task_log(root, monkeypatch, tmp_p
 
     monkeypatch.setattr(farm_agent, "write_request", lambda **kw: "REQ-1")
     monkeypatch.setattr(farm_agent, "trigger_task", lambda: (True, "已触发"))
+    monkeypatch.setattr(farm_agent, "wait_elevated_started", lambda *a, **k: True)
 
     def _fake_read_result(request_id: str) -> dict:
         calls["n"] += 1
@@ -783,6 +786,7 @@ def test_elevated_giving_up_is_written_to_the_shared_task_log(root, monkeypatch,
 
     monkeypatch.setattr(farm_agent, "write_request", lambda **kw: "REQ-1")
     monkeypatch.setattr(farm_agent, "trigger_task", lambda: (True, "已触发"))
+    monkeypatch.setattr(farm_agent, "wait_elevated_started", lambda *a, **k: True)
     monkeypatch.setattr(farm_agent, "read_result_for", lambda _rid: {})
     monkeypatch.setattr(farm_agent.time, "sleep", lambda _s: None)
     monkeypatch.setattr(farm_agent, "ELEVATION_TIMEOUT_SECONDS", 0)
@@ -817,6 +821,32 @@ def test_elevated_broker_reports_a_failed_trigger(root, monkeypatch, tmp_path, c
     assert "提权通道启动失败" in capsys.readouterr().err
     # 启动失败只打 stderr 的话，终端一关就没了；落一份到共享日志，控制机才看得到
     assert "提权通道启动失败" in log.read_text(encoding="utf-8")
+
+
+def test_elevated_broker_fails_fast_when_task_never_starts(root, monkeypatch, tmp_path, capsys):
+    """**2026-09-29 回归锁**：`/Run` 返回 0 但提权侧毫无动静时，早失败，不进 4 小时轮询。
+
+    现场就是这个坑：计划任务动作被改坏 / venv 缺失 / UAC 静默拒绝时，`schtasks /Run`
+    照样返回 0，agent 以为已交棒，对着永远不会来的 result.json 空等
+    ELEVATION_TIMEOUT_SECONDS（4 小时），终端只刷「提权段进行中」。
+    判据不能信 /Run 退出码 —— 触发后要验证提权侧真起来了，起不来立刻返回失败码。
+    """
+    monkeypatch.setattr(farm_agent, "write_request", lambda **kw: "REQ-1")
+    monkeypatch.setattr(farm_agent, "trigger_task", lambda: (True, "已触发"))
+    # 触发返回成功，但等不到任何痕迹（wrapper.log / elevated_run.log / result.json 都没动）
+    monkeypatch.setattr(farm_agent, "wait_elevated_started", lambda *a, **k: False)
+    monkeypatch.setattr(farm_agent, "read_result_for", _boom_if_called)
+
+    log = tmp_path / "n.log"
+    rc, _creds = farm_agent.run_suite_elevated(
+        "install", 1, 1, log, task_id="T1", task_env={}
+    )
+    assert rc == 2, "提权侧没起来要返回失败码，绝不进 4 小时轮询空等"
+    err = capsys.readouterr().err
+    assert "毫无动静" in err, "要说清是'触发成功但没起来'，与'触发失败'区分开"
+    text = log.read_text(encoding="utf-8")
+    assert "毫无动静" in text, "同样要落共享日志，控制机才看得到真因"
+    assert "run_elevated_suite.ps1" in text, "要指路到计划任务动作，运维照着查"
 
 
 def test_manual_prompt_is_skipped_for_a_smoke_task(root, monkeypatch):

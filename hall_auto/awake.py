@@ -46,6 +46,10 @@
    所以恢复放在 `atexit`。
 2. **`SetThreadExecutionState` 只管"不许息屏"，管不了 RDP 断连**。RDP 断连后会话变非交互态，
    抓屏黑屏、点击无落点 —— 这只能靠巡检发现并中止，不能靠常亮兜住。
+3. **巡检判「非交互」不能单次采样就 latch**。UAC 弹到安全桌面（真装真卸、装小硕知道会跳）
+   那一瞬 `GetForegroundWindow()` 为 NULL，也算非交互，但点掉 UAC 就秒回。单次就 latch 会
+   把这一闪当永久丢失、在下个用例边界 `pytest.exit` 掉整轮（2026-09-29 踩过）。所以走
+   `_SessionLossDebouncer` 去抖：只有**连续**非交互超过 `_SESSION_LOST_GRACE_SEC` 才判真丢失。
 """
 
 from __future__ import annotations
@@ -64,6 +68,14 @@ ES_DISPLAY_REQUIRED = 0x00000002  # 阻止显示器关闭（息屏）
 # 又不会让 CPU 忙起来。
 _REFRESH_SEC = 5
 
+# 交互态要**连续丢失**这么久才判真丢失。为什么加这层去抖而不是单次采样就 latch：
+# `is_interactive_session()` 靠 GetForegroundWindow()，UAC 弹到安全桌面那一瞬
+# （真装真卸、装小硕知道会跳）前台窗口为 NULL → 判成非交互，但点掉 UAC 就秒回。
+# 真锁屏 / RDP 断连则是**一直**非交互。单次采样就 latch 会把 UAC 那一闪当成永久丢失，
+# 在每个用例结束的 `_session_guard` 里 `pytest.exit` 掉整轮（2026-09-29 踩过）。
+# 去抖窗口给足点掉 UAC 的时间，又短到真断连能在几轮巡检内被发现。
+_SESSION_LOST_GRACE_SEC = 30
+
 _watch_thread: threading.Thread | None = None
 _watch_stop = threading.Event()
 # 是否已装配过常亮+巡检（显式标志，比看 thread.is_alive() 可靠：
@@ -71,6 +83,33 @@ _watch_stop = threading.Event()
 _watch_armed = False
 _session_lock = threading.Lock()
 _session_lost_at: float | None = None
+
+
+class _SessionLossDebouncer:
+    """把「单次非交互」去抖成「持续非交互才算真丢失」。
+
+    抽成类是为了**可单测**：这段逻辑原来埋在 `keep_awake_for_process` 的巡检闭包里，
+    测不到。UAC 跳安全桌面那一瞬的非交互必须被吞掉（否则整轮 pytest 被误杀），
+    真锁屏 / RDP 断连又必须被抓到 —— 这条区分只能靠「连续非交互是否超过宽限期」。
+
+    `observe()` 每次巡检喂一个采样：交互态返回 False 并清零计时；
+    非交互态在**首次**只记起点、返回 False（还没到宽限期），
+    持续到 `now - 起点 >= grace_sec` 才返回 True（该 latch 了）。
+    """
+
+    def __init__(self, grace_sec: float = _SESSION_LOST_GRACE_SEC) -> None:
+        self._grace = grace_sec
+        self._lost_since: float | None = None
+
+    def observe(self, interactive: bool, now: float) -> bool:
+        if interactive:
+            self._lost_since = None
+            return False
+        if self._lost_since is None:
+            self._lost_since = now
+            return False
+        return (now - self._lost_since) >= self._grace
+
 
 
 def keep_awake_start() -> bool:
@@ -109,12 +148,17 @@ def keep_awake_for_process() -> bool:
     atexit.register(_restore_on_exit)
 
     def _watch() -> None:
-        """定期续常亮，并记录交互态翻转（RDP 断连 / 锁屏）。"""
+        """定期续常亮，并记录**持续**的交互态丢失（RDP 断连 / 锁屏）。
+
+        单次非交互不 latch —— 交给 `_SessionLossDebouncer` 去抖：UAC 跳安全桌面那一瞬
+        也非交互但秒回，只有连续非交互超过宽限期才判真丢失（由头见该常量与那个类）。
+        """
         from hall_auto.dpi import is_interactive_session
 
+        debouncer = _SessionLossDebouncer()
         while not _watch_stop.wait(_REFRESH_SEC):
             keep_awake_start()  # ES_CONTINUOUS 已是持续态，这里续一次防被别的进程冲刷
-            if not is_interactive_session():
+            if debouncer.observe(is_interactive_session(), time.monotonic()):
                 mark_session_lost()
 
     _watch_thread = threading.Thread(target=_watch, name="hall-awake-watch", daemon=True)

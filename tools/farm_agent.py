@@ -95,9 +95,11 @@ from hall_auto.awake import keep_awake_for_process  # noqa: E402
 from hall_auto.dpi import is_interactive_session, machine_profile, node_id  # noqa: E402
 from hall_auto.elevation import (  # noqa: E402
     ELEVATION_TASK_NAME,
+    activity_snapshot,
     is_elevated,
     read_result_for,
     trigger_task,
+    wait_elevated_started,
     write_request,
 )
 from hall_auto.env_pack import (  # noqa: E402
@@ -122,6 +124,10 @@ POLL_SECONDS = 30
 # 单套件十几分钟是常态；4 小时兜住两台慢机的极端情况。
 ELEVATION_TIMEOUT_SECONDS = 4 * 3600
 ELEVATION_POLL_SECONDS = 5
+# 触发后等「提权侧真起来」的窗口。wrapper 被拉起到写第一行 log 是秒级的事，
+# 给 60s 足够宽裕；等不到就是计划任务没真跑（动作指向坏了 / venv 没了 / 任务被禁用），
+# 早失败远好过进上面那个 4 小时轮询空等（见 run_suite_elevated 里的 wait_elevated_started）。
+ELEVATION_START_TIMEOUT_SECONDS = 60
 # 等待期间的心跳间隔。**不能静默等** —— 提权段几分钟没有输出，
 # 现场分不清「在装」和「任务触发了但没跑起来」，这正是本项目反复踩的那类假象。
 ELEVATION_HEARTBEAT_SECONDS = 30
@@ -418,12 +424,31 @@ def run_suite_elevated(
         env={k: v for k, v in (task_env or {}).items()},
     )
 
+    # 触发前先抓基线：之后靠「痕迹比基线新」判断提权侧真起来了（见 wait_elevated_started）。
+    pre_trigger_snap = activity_snapshot()
+
     ok, note = trigger_task()
     if not ok:
         detail = (
             f"⚠ 提权通道启动失败：{note}\n"
             f"  排查：① 计划任务 {ELEVATION_TASK_NAME} 在不在（schtasks /Query /TN {ELEVATION_TASK_NAME}）；"
             "② 不在就用管理员重跑 tools\\bootstrap_machine.ps1（幂等）。"
+        )
+        print(f"  {detail}", file=sys.stderr, flush=True)
+        _append_log(log_path, f"[{_beat_stamp()}] {detail}")
+        return 2, creds
+
+    # `/Run` 退出码 0 只代表「请求被受理」，不代表任务真起来了。等提权侧留下第一处痕迹
+    # （wrapper.log / elevated_run.log 动了，或 result.json 出现）再进轮询；等不到就早失败。
+    # 否则动作被改坏 / venv 缺失 / UAC 静默拒绝时，会对着永远不会来的 result.json
+    # 空等 ELEVATION_TIMEOUT_SECONDS（4 小时），现场只刷「提权段进行中」（2026-09-29 踩过）。
+    if not wait_elevated_started(pre_trigger_snap, timeout_sec=ELEVATION_START_TIMEOUT_SECONDS):
+        detail = (
+            f"⚠ 提权通道触发返回成功，但 {ELEVATION_START_TIMEOUT_SECONDS}s 内提权侧毫无动静"
+            f"（wrapper.log / elevated_run.log 没更新、result.json 没出现）—— 计划任务没真跑起来。\n"
+            f"  排查：① 计划任务动作指向对不对（schtasks /Query /TN {ELEVATION_TASK_NAME} /XML，"
+            "应指向 tools\\run_elevated_suite.ps1）；② .venv\\Scripts\\python.exe 在不在；"
+            "③ 任务是不是被禁用/改成非提权；④ 修复后用管理员重跑 tools\\bootstrap_machine.ps1（幂等）。"
         )
         print(f"  {detail}", file=sys.stderr, flush=True)
         _append_log(log_path, f"[{_beat_stamp()}] {detail}")

@@ -69,6 +69,9 @@ REQUEST_DIR = REPO_ROOT / "reports" / "_elev"
 REQUEST_NAME = "request.json"
 RESULT_NAME = "result.json"
 LOG_NAME = "elevated_run.log"
+# 计划任务动作脚本（tools/run_elevated_suite.ps1）自己追加的日志。它在 elevated_runner
+# 起来**之前**就会被写一行，所以是「提权侧到底起没起」最早的可见证据。
+WRAPPER_LOG_NAME = "wrapper.log"
 
 # 提权段只允许这些 pytest 参数通过。请求文件躺在仓库里、又能被提权进程执行，
 # 白名单是防「文件被塞了别的东西」的第二道闸（第一道是仓库本身的写权限）。
@@ -86,6 +89,10 @@ def result_path(root: Path | None = None) -> Path:
 
 def log_path(root: Path | None = None) -> Path:
     return (root or REQUEST_DIR) / LOG_NAME
+
+
+def wrapper_log_path(root: Path | None = None) -> Path:
+    return (root or REQUEST_DIR) / WRAPPER_LOG_NAME
 
 
 def is_elevated() -> bool:
@@ -258,6 +265,67 @@ def trigger_task(task: str = ELEVATION_TASK_NAME) -> tuple[bool, str]:
         detail = (proc.stdout or "") + (proc.stderr or "")
         return False, f"schtasks /Run 退出码 {proc.returncode}：{detail.strip()[:300]}"
     return True, "已触发"
+
+
+def _mtime(path: Path) -> float:
+    """文件修改时间；不存在 / 读不到返回 0.0。"""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def activity_snapshot(root: Path | None = None) -> dict[str, float]:
+    """触发提权任务**之前**抓一份「提权侧痕迹」的基线。
+
+    为什么要基线：`schtasks /Run` 退出码 0 只代表「请求被受理」，**不代表任务真起来了**
+    —— 计划任务的动作被改坏、venv 缺失、UAC 静默拒绝时，`/Run` 照样返回 0，
+    而提权侧一个字都不写。本项目 2026-09-29 就踩了这个：agent 以为已交棒，
+    对着永远不会出现的 `result.json` 空等了 4 小时（`ELEVATION_TIMEOUT_SECONDS`），
+    现场表现是「提权段 xxx 进行中」一直刷，节点侧却毫无动静。
+
+    所以判据不能信 `/Run` 的退出码，要看提权侧**真的动过**：wrapper.log / elevated_run.log
+    的 mtime 比基线新，或 result.json 已经出现。这三个痕迹覆盖了 elevated_runner 的
+    每一条出口（正常跑写 log、幂等/非提权/校验失败写 result.json），只要它起来了必留其一。
+    """
+    root = root or REQUEST_DIR
+    return {
+        "wrapper": _mtime(wrapper_log_path(root)),
+        "run": _mtime(log_path(root)),
+    }
+
+
+def elevated_started(snap: dict[str, float], root: Path | None = None) -> bool:
+    """提权侧相对基线 `snap` 是否已经动起来。见 `activity_snapshot` 的由头。"""
+    root = root or REQUEST_DIR
+    if result_path(root).exists():
+        return True
+    if _mtime(wrapper_log_path(root)) > snap.get("wrapper", 0.0):
+        return True
+    if _mtime(log_path(root)) > snap.get("run", 0.0):
+        return True
+    return False
+
+
+def wait_elevated_started(
+    snap: dict[str, float],
+    timeout_sec: float = 30.0,
+    interval: float = 1.0,
+    root: Path | None = None,
+) -> bool:
+    """在 `timeout_sec` 内等提权侧起来。起来返回 True，超时返回 False。
+
+    超时给几十秒就够：wrapper 被拉起到写第一行 log 是秒级的事。等不到基本就是
+    计划任务没真跑（动作指向坏了 / venv 没了 / 任务被禁用），这时**早失败**远好过
+    进 4 小时的轮询 —— 早失败能立刻把「提权通道没起来」和「提权段跑得慢」区分开。
+    """
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        if elevated_started(snap, root):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
 
 
 def venv_python() -> Path:
