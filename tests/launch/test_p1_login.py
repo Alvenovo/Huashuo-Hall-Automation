@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -458,6 +459,11 @@ def test_forgot_password_reset_manual(cfg, ready_pid):
     2026-09-28 那轮就是漏了这条：还原程发码撞限流、裸抛了一句限流提示，
     "密码可能已经改了"一个字都没说，而第一程其实是成功的。
     """
+    # 本轮人工选择不测改密码：立即 skip，绝不发码、绝不动密码。
+    # 开关由 farm_agent 在问完「要不要参与人在环」后再问一句「要不要测改密码」置上，
+    # 省掉这条真发的 2 个短信码。skip 带原因，报告里是「本轮选择不测」而非空白/假绿。
+    if os.environ.get("HALL_MANUAL_SKIP_PASSWORD") == "1":
+        pytest.skip("本轮人工选择不测改密码（HALL_MANUAL_SKIP_PASSWORD=1）——省 2 个短信码")
     user, old_password = cfg.test_account()
     new_password = cfg.new_password()
     if not (user and old_password and new_password):

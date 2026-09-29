@@ -66,6 +66,10 @@ TASK_ENV_ALLOWLIST = frozenset({
     "HALL_PACKAGE_SHARE",
     "HALL_PACKAGE_CACHE",
     "HALL_INSTALLER_DIR",
+    # 人在环运行控制开关（非敏感）：本轮是否跳过「忘记密码往返」。
+    # 节点侧 agent 在问完「要不要参与人在环」后再问一句「要不要测改密码」，
+    # 答「不测」就把这个置 1，省掉那条用例真发的 2 个短信码。
+    "HALL_MANUAL_SKIP_PASSWORD",
 })
 
 # 只在节点本地凭据文件里认的变量（敏感项）。任务文件里出现也不接受。

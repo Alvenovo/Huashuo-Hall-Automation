@@ -308,3 +308,30 @@ def test_restore_failure_warning_names_the_new_password():
     assert "新密码" in str(exc.value)
     assert "还原挂了" in str(exc.value)
 
+
+def test_forgot_password_skips_before_touching_anything_when_opted_out(monkeypatch):
+    """本轮选择不测改密码（`HALL_MANUAL_SKIP_PASSWORD=1`）→ **立即 skip**。
+
+    传 `cfg=None, ready_pid=None`：跳过守卫若真在最前面，这两个参数一个都碰不到，
+    就不会 AttributeError —— 这就证明了 skip 发生在任何发码/改密码/读凭据之前。
+    """
+    from tests.launch.test_p1_login import test_forgot_password_reset_manual
+
+    monkeypatch.setenv("HALL_MANUAL_SKIP_PASSWORD", "1")
+    with pytest.raises(pytest.skip.Exception) as exc:
+        test_forgot_password_reset_manual(cfg=None, ready_pid=None)
+    assert "改密码" in str(exc.value)
+
+
+def test_forgot_password_does_not_skip_when_flag_absent(monkeypatch):
+    """开关没置（或非 "1"）时**不许**被这条守卫跳过 —— 照常往下走。
+
+    仍传 `cfg=None`：既然没在守卫处 skip，就会执行到 `cfg.test_account()`，
+    对 None 取属性抛 AttributeError。用它反证"守卫没触发、流程继续了"。
+    """
+    from tests.launch.test_p1_login import test_forgot_password_reset_manual
+
+    monkeypatch.delenv("HALL_MANUAL_SKIP_PASSWORD", raising=False)
+    with pytest.raises(AttributeError):
+        test_forgot_password_reset_manual(cfg=None, ready_pid=None)
+

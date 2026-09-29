@@ -95,6 +95,28 @@ def test_task_env_accepts_allowlisted():
     assert rejected == []
 
 
+def test_manual_skip_password_is_an_allowlisted_run_control_flag():
+    """「本轮不测改密码」开关是**非敏感运行控制项**，必须能从 task_env 下发到子进程。
+
+    漏进白名单的话：farm_agent 答「不测」后置了这个键，`sanitize_task_env` 会把它当
+    未知项忽略 —— 子进程 pytest 收不到，改密码用例照常跑、照发 2 个短信码，
+    而终端上却打了「本轮跳过」，是最坏的一种言行不一。
+    """
+    accepted, rejected = env_pack.sanitize_task_env({"HALL_MANUAL_SKIP_PASSWORD": "1"})
+    assert accepted == {"HALL_MANUAL_SKIP_PASSWORD": "1"}
+    assert rejected == []
+    # 它绝不能被误列进敏感项（否则从任务文件下发会被拒）
+    assert "HALL_MANUAL_SKIP_PASSWORD" not in env_pack.NODE_ENV_SECRET_KEYS
+
+
+def test_manual_skip_password_reaches_the_child_env(tmp_path):
+    """端到端：task_env 里的开关要真出现在 build_suite_env 产出的子进程环境里。"""
+    env, _notes = env_pack.build_suite_env(
+        task_env={"HALL_MANUAL_SKIP_PASSWORD": "1"}, node_env_path=tmp_path / "absent.env"
+    )
+    assert env.get("HALL_MANUAL_SKIP_PASSWORD") == "1"
+
+
 def test_task_env_rejects_secrets():
     """**红线**：任务文件躺在共享盘上，密码写进去等于公开。必须拒收。"""
     accepted, rejected = env_pack.sanitize_task_env({
