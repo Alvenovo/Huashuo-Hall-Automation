@@ -1107,11 +1107,14 @@ _BIND_PHONE_AIDS = ("MobileInput", "MobileInputBox", "PhoneInput", "BindMobileIn
 _BIND_CODE_AIDS = ("CodeInput", "CodeInputBox", "SmsCodeInput", "VerifyCodeInput")
 _BIND_SEND_AIDS = ("CodeSendBtn", "SendBtn", "GetCodeBtn", "CodeSendButton")
 _BIND_SEND_NAMES = ("获取验证码", "发送验证码", "获取短信验证码", "获取校验码")
-_BIND_CONFIRM_AIDS = ("ConfirmBtn", "SetBtn", "BindBtn", "OkBtn", "SubmitBtn")
+# ⚠️ "BandBtn" 是绑定弹窗确认按钮的**真实 aid**（产品拼成 Band 不是 Bind，
+# 2026-09-29 节点控件树实锤），必须放**首位**：主窗口里 SetBtn 是「设置」按钮，
+# 若 scope 落到主窗口，把 BandBtn 排在 SetBtn 前面才不会误点设置。
+_BIND_CONFIRM_AIDS = ("BandBtn", "ConfirmBtn", "BindBtn", "OkBtn", "SubmitBtn", "SetBtn")
 # ⚠️ 确认按钮的**名字候选里刻意不放"绑定"**：弹窗标题就是「绑定手机号」，
 # 按名字搜会把标题那块 Text 当成按钮 —— 点下去什么都没发生，而脚本以为提交过了。
 _BIND_CONFIRM_NAMES = ("确定", "确认", "提交", "完成")
-_BIND_CANCEL_AIDS = ("CancelBtn", "closebtn")
+_BIND_CANCEL_AIDS = ("CancelBtn", "CloseBtn")
 _BIND_CANCEL_NAMES = ("取消", "关闭", "以后再说", "暂不", "跳过")
 
 

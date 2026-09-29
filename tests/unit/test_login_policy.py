@@ -323,6 +323,41 @@ def test_bind_confirm_names_never_contain_the_dialog_title_word():
 
 
 @pytest.mark.unit
+def test_bind_confirm_aids_carry_the_real_product_aid_before_settings():
+    """**关键保护**：确认按钮 aid 候选必须含产品真实的 `BandBtn`，且排在 `SetBtn` 前。
+
+    2026-09-29 节点控件树实锤：绑定弹窗确认按钮 aid=`BandBtn`（产品拼成 Band 不是 Bind）、
+    name=`绑定`。名字「绑定」被上一条守卫禁掉，所以**只能靠 aid 命中**——漏了就恒为 None
+    （那轮 `test_microsoft_login_code_manual` 的真因）。`SetBtn` 在主窗口是「设置」按钮，
+    BandBtn 排在它前面，scope 万一落到主窗口也不会误点设置。
+    """
+    aids = login._BIND_CONFIRM_AIDS
+    assert "BandBtn" in aids, aids
+    assert aids.index("BandBtn") < aids.index("SetBtn"), aids
+
+
+@pytest.mark.unit
+def test_bind_confirm_button_hits_bandbtn_not_the_title_text():
+    """按真实弹窗快照：`bind_confirm_button` 必须命中 `BandBtn` 那个 Button，
+    既不能把标题 `Text`「绑定手机号」当按钮，也不能命中主窗口的「设置」(SetBtn)。"""
+    marker_text = SimpleNamespace(kind="title-text")
+    band_btn = SimpleNamespace(kind="band")
+    set_btn = SimpleNamespace(kind="settings")
+    snapshot = [
+        ("TitleLabel", "Text", "应用标题", SimpleNamespace(kind="title")),
+        ("", "Text", "绑定手机号", marker_text),
+        ("MobileInputBox", "Edit", "手机号输入框", SimpleNamespace(kind="phone")),
+        ("CodeInput", "Edit", "验证码输入框", SimpleNamespace(kind="code")),
+        ("BandBtn", "Button", "绑定", band_btn),
+        ("CloseBtn", "Button", "关闭", SimpleNamespace(kind="close")),
+        ("SetBtn", "Button", "设置", set_btn),
+    ]
+    with mock.patch.object(login, "_bind_snapshot", return_value=snapshot):
+        got = login.bind_confirm_button(object())
+    assert got is band_btn, got
+
+
+@pytest.mark.unit
 def test_bind_signature_needs_a_control_not_just_the_text():
     """**关键保护**：光有「绑定手机号」文案不算弹窗，必须有手机号框或发送按钮。
 
