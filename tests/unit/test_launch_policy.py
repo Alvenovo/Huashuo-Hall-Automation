@@ -212,7 +212,7 @@ def test_ready_failures_all_carry_the_occlusion_diagnosis():
     新增出口忘了包 `_with_hint` 会立刻变红。
     """
     messages = _launch_error_messages()
-    assert len(messages) == 2, (
+    assert len(messages) == 3, (
         f"wait_until_ready 的 LaunchError 出口数变了（{len(messages)}）——"
         "新增/删改出口时请同步这条守卫，并确认每条都带了遮挡诊断"
     )
@@ -258,7 +258,7 @@ def test_occlusion_is_measured_before_the_screenshot():
     func = _ready_func()
     notes = _call_lines(func, "_occlusion_note")
     shots = _call_lines(func, "_save_screenshot")
-    assert len(notes) == len(shots) == 2, (
+    assert len(notes) == len(shots) == 3, (
         f"依据/截图两两配对的前提变了：_occlusion_note={notes} _save_screenshot={shots}"
     )
     for note_line, shot_line in zip(notes, shots):
@@ -415,3 +415,97 @@ def test_back_if_subpage_prefers_back_button():
     assert launch._back_if_subpage(main) is True
     assert back.pressed == ["invoke"]
     assert nav.scrolled == []
+
+
+# ------------------------- 主窗口按「面积最大」选，破多窗歧义（2026-10-09）
+
+
+class _FakeApp:
+    def __init__(self, pid):
+        self.process = pid
+
+
+def _patch_windows(monkeypatch, windows):
+    """windows: [(hwnd, visible, pid, title, rect, uia_name)]"""
+    by_hwnd = {w[0]: w for w in windows}
+
+    class _Info:
+        def __init__(self, name, hwnd):
+            self.name = name
+            self.hwnd = hwnd
+
+    monkeypatch.setattr(launch, "_top_hwnds", lambda: list(by_hwnd))
+    monkeypatch.setattr(launch, "_hwnd_visible", lambda h: by_hwnd[h][1])
+    monkeypatch.setattr(launch, "_hwnd_pid", lambda h: by_hwnd[h][2])
+    monkeypatch.setattr(launch, "_hwnd_text", lambda h: by_hwnd[h][3])
+    monkeypatch.setattr(launch, "_hwnd_rect", lambda h: by_hwnd[h][4])
+    monkeypatch.setattr(launch, "UIAElementInfo", lambda h: _Info(by_hwnd[h][5], h))
+    monkeypatch.setattr(launch, "UIAWrapper", lambda info: ("wrap", info))
+
+
+_CARD = (1, True, 42, "华硕大厅", (0, 0, 1500, 800), "启动卡片窗口")  # 欢迎使用卡片：标题同主窗，UIA Name 不同
+_MAIN = (2, True, 42, "华硕大厅", (0, 0, 1600, 900), "华硕大厅")  # 真主窗口
+_OTHER = (3, True, 42, "别的程序", (0, 0, 1600, 900), "别的程序")  # 标题不含关键词，必须被过滤
+_HIDDEN = (4, False, 42, "华硕大厅", (0, 0, 2000, 1200), "华硕大厅")  # 隐藏窗面积再大也不能选
+
+
+@pytest.mark.unit
+def test_main_window_picks_largest_area_window(monkeypatch):
+    """同 pid 多窗标题都含「华硕大厅」时选**面积最大**的可见窗，不选卡片窗/隐藏窗。"""
+    _patch_windows(monkeypatch, [_CARD, _MAIN, _OTHER, _HIDDEN])
+    got = launch.main_window(_FakeApp(42), "华硕大厅", 1)
+    assert got[0] == "wrap" and got[1].hwnd == _MAIN[0]
+
+
+@pytest.mark.unit
+def test_main_window_waits_instead_of_grabbing_the_startup_card(monkeypatch):
+    """首跑那一瞬只有卡片窗可见时**不许**把它当主窗口冻住 —— 必须继续等真主窗口。
+
+    2026-10-09 本机实付：即时解析抓了卡片窗，ready 随即把真主窗口报成「未知弹窗」。
+    """
+    _patch_windows(monkeypatch, [_CARD])
+    with pytest.raises(launch.LaunchError):
+        launch.main_window(_FakeApp(42), "华硕大厅", 0)
+
+
+@pytest.mark.unit
+def test_concrete_main_picks_largest_area_window(monkeypatch):
+    """wb 夹具走 concrete_main 重解析主窗口，同样不能按「第一个」抓到卡片窗。"""
+    _patch_windows(monkeypatch, [_CARD, _MAIN])
+    got = launch.concrete_main(42, "华硕大厅")
+    assert got[0] == "wrap" and got[1].hwnd == _MAIN[0]
+
+
+@pytest.mark.unit
+def test_main_window_raises_when_no_window_matches(monkeypatch):
+    _patch_windows(monkeypatch, [_OTHER])
+    with pytest.raises(launch.LaunchError):
+        launch.main_window(_FakeApp(42), "华硕大厅", 0)
+
+
+@pytest.mark.unit
+def test_concrete_main_raises_when_no_window_matches(monkeypatch):
+    _patch_windows(monkeypatch, [])
+    with pytest.raises(launch.LaunchError):
+        launch.concrete_main(42, "华硕大厅")
+
+
+# ------------------------- 首页内容健康检查：结构就绪 ≠ 内容渲染（2026-10-09）
+
+
+@pytest.mark.unit
+def test_home_content_present_true_when_tiles_or_banners_rendered():
+    main = _FakeNode("专题页", "专题页 - Web 内容", "广告图片1", "WPS Office27的2已选择")
+    assert launch.home_content_present(main) is True
+
+
+@pytest.mark.unit
+def test_home_content_present_false_when_webview_blank():
+    """空白态：容器「专题页」在，但没有任何磁贴/横幅 —— 不能算就绪。"""
+    main = _FakeNode("华硕大厅", "搜索框", "应用分类", "专题页", "专题页 - Web 内容")
+    assert launch.home_content_present(main) is False
+
+
+@pytest.mark.unit
+def test_home_content_present_never_raises_when_uia_is_broken():
+    assert launch.home_content_present(_BoomNode()) is False

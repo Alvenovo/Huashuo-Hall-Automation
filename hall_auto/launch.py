@@ -14,6 +14,7 @@ from hall_auto.config import Config, LaunchSettings, REPO_ROOT
 from hall_auto.product import EXE_NAME, read_installed, stop_main_process
 from hall_auto.winapi import (
     _hwnd_pid,
+    _hwnd_rect,
     _hwnd_text,
     _hwnd_visible,
     _top_hwnds,
@@ -25,6 +26,10 @@ from hall_auto.winapi import (
 REPORTS_DIR = REPO_ROOT / "reports" / "launch"
 
 HOME_TAB_NAME = "推荐"
+
+# 启动卡片窗的 UIA Name 标记：Win32 标题与主窗口同为「华硕大厅」，靠这个名字区分。
+# 与 config 的 popup_whitelist_keywords「启动卡片」同源，但用途不同（认窗 vs 关弹窗）。
+CARD_WINDOW_NAME_MARK = "启动卡片"
 
 
 class LaunchError(RuntimeError):
@@ -180,12 +185,16 @@ def _overlay_windows(main, settings: LaunchSettings, main_handle=None, pid=None)
             node = _wrap_hwnd(hwnd)
             if node is None:
                 continue
-            name = popup_text(_hwnd_text(hwnd))
+            # UIA Name 优先、Win32 标题兜底 —— 和上面子 Window 分支同序。
+            # 启动卡片窗的 Win32 标题是「华硕大厅」（和主窗口同名、毫无区分度），
+            # 能对上白名单的「启动卡片」只在 UIA Name「启动卡片窗口」里；
+            # 按 Win32 标题取名会把它报成「未知弹窗」直接判死（2026-10-09 本机实付）。
+            try:
+                name = popup_text(node.element_info.name)
+            except Exception:
+                name = ""
             if not name:
-                try:
-                    name = popup_text(node.element_info.name)
-                except Exception:
-                    continue
+                name = popup_text(_hwnd_text(hwnd))
             _add(name, node, top_level=True)
     return found
 
@@ -429,33 +438,71 @@ def connect_app(timeout_sec: int) -> Application:
     raise LaunchError(f"未能连接到 {EXE_NAME}: {last}")
 
 
+def _largest_title_hwnd(pid: int, title_contains: str) -> int | None:
+    """同 pid 下标题含 title_contains 的**可见**顶层窗里，面积最大的那个 hwnd。
+
+    ## 为什么按面积（2026-10-09 节点实付）
+
+    首跑时同 pid 下会有**多个**顶层窗标题都含「华硕大厅」（启动卡片窗 Win32 标题
+    也叫华硕大厅，UIA Name 才叫「启动卡片窗口」）：4 个匹配时 pywinauto 的 title_re
+    直接抛 ElementAmbiguousError（install 套件就死在这），按"第一个"取又可能抓到
+    卡片窗。主窗口永远是面积最大的那个，按 Win32 rect 选，歧义和抓错窗一起解掉。
+
+    ## 为什么还要按 UIA Name 排除卡片窗（同日本机实付）
+
+    光按面积不够：**首跑那一瞬真主窗口还没可见**，屏幕上最大的「华硕大厅」就是
+    那张「欢迎使用」卡片（它自己就是个大 Dialog）。本函数是**即时**解析（不像旧
+    title_re 那样每次用才重解析），抓错就冻住了 —— 于是 ready 把真主窗口当成
+    「未知弹窗」报出来。卡片窗 UIA Name 恒为「启动卡片窗口」，真主窗口登录前后是
+    「华硕大厅」/「华硕应用商店」，按这个名字排除即可；排除后若只剩卡片，返回
+    None 让调用方继续等真主窗口。
+    """
+    best, best_area = None, 0
+    for hwnd in _top_hwnds():
+        if not _hwnd_visible(hwnd) or _hwnd_pid(hwnd) != pid:
+            continue
+        if title_contains not in popup_text(_hwnd_text(hwnd)):
+            continue
+        try:
+            uia_name = popup_text(UIAElementInfo(hwnd).name)
+        except Exception:
+            uia_name = ""
+        if CARD_WINDOW_NAME_MARK in uia_name:
+            continue
+        left, top, right, bottom = _hwnd_rect(hwnd)
+        area = max(0, (right - left) * (bottom - top))
+        if area > best_area:
+            best, best_area = hwnd, area
+    return best
+
+
 def main_window(app: Application, title_contains: str, timeout_sec: int):
+    """等主窗口出现，返回**面积最大**的那个匹配窗的 concrete wrapper（见 _largest_title_hwnd）。"""
     deadline = time.time() + timeout_sec
-    last = None
     while time.time() < deadline:
         try:
-            win = app.window(title_re=f".*{title_contains}.*", class_name="Window")
-            win.wait("visible", timeout=3)
-            return win
-        except Exception as exc:
-            last = exc
-            time.sleep(1)
-    raise LaunchError(f"未出现主窗口（标题含 {title_contains}）: {last}")
+            pid = app.process
+        except Exception:
+            pid = None
+        if pid:
+            best = _largest_title_hwnd(pid, title_contains)
+            if best is not None:
+                return UIAWrapper(UIAElementInfo(best))
+        time.sleep(1)
+    raise LaunchError(f"未出现主窗口（标题含 {title_contains}）")
 
 
 def concrete_main(pid: int, title_contains: str):
-    """按 Win32 标题 + pid 重新包一个具体的主窗口 wrapper。
+    """按 Win32 标题 + pid 重新包一个具体的主窗口 wrapper（面积最大者）。
 
     登录后主窗口的 UIA Name 从「华硕大厅」变成「华硕应用商店」（Win32 标题不变，
     2026-09-16 实测），main_window 那个按 title_re 懒解析的 WindowSpecification
     会一直 ElementNotFoundError。登录态下要操作主窗口（进「我的」等）必须换用本函数。
     """
-    for hwnd in _top_hwnds():
-        if not _hwnd_visible(hwnd) or _hwnd_pid(hwnd) != pid:
-            continue
-        if title_contains in popup_text(_hwnd_text(hwnd)):
-            return UIAWrapper(UIAElementInfo(hwnd))
-    raise LaunchError(f"pid={pid} 名下找不到标题含 {title_contains!r} 的可见顶层窗")
+    best = _largest_title_hwnd(pid, title_contains)
+    if best is None:
+        raise LaunchError(f"pid={pid} 名下找不到标题含 {title_contains!r} 的可见顶层窗")
+    return UIAWrapper(UIAElementInfo(best))
 
 
 def dismiss_pre_main_popups(app: Application, settings: LaunchSettings) -> bool:
@@ -559,6 +606,37 @@ def _with_hint(message: str, hint: str) -> str:
     return f"{message}｜遮挡诊断：{hint}" if hint else message
 
 
+HOME_CONTENT_MARKERS = ("广告", "已选择")
+
+
+def home_content_present(main) -> bool:
+    """首页 WebView 是否**真有内容**，而不是只有一个空壳容器。
+
+    ## 为什么结构就绪还不够（2026-10-09 节点实付）
+
+    10:01 那轮 `wait_until_ready` 判定通过（SearchBarInput/TabList/MainWeb 齐全、
+    「专题页」也在），截图里首页却**整块内容区纯白**：导航、搜索框都在，WebView2
+    没渲染出任何磁贴/横幅。于是 wb 7 条用例在 0.4s 全红，报「左下角入口未找全: []」
+    —— 看着像产品缺陷，其实是**就绪判据漏了"内容"这一维**。
+
+    「专题页」是 WebView2 的**容器**名，空白时它照样在；只有真的渲染出内容才会有
+    「广告」横幅 / 「…已选择」应用磁贴（见 reports/probe/ready_dump.json 健康态）。
+    所以拿这两个当硬标记，容器不算。
+    """
+    try:
+        nodes = main.descendants()
+    except Exception:
+        return False
+    for node in nodes:
+        try:
+            name = popup_text(node.element_info.name)
+        except Exception:
+            continue
+        if name and any(m in name for m in HOME_CONTENT_MARKERS):
+            return True
+    return False
+
+
 def wait_until_ready(cfg: Config, main) -> LaunchResult:
     settings = cfg.launch
     # handle / pid 是不变量，但 UIA 每次取要 ~1s（实测），就绪循环每轮都跑覆盖层
@@ -572,6 +650,7 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
     except Exception:
         pid = None
     deadline = time.time() + cfg.timeouts.ready_sec
+    content_retried = False
     while time.time() < deadline:
         # 每轮只枚举一次覆盖层，白名单/未知判定复用同一份列表
         overlays = _overlay_windows(main, settings, main_handle=main_handle, pid=pid)
@@ -599,9 +678,22 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
             time.sleep(0.5)
             continue
         if not missing and webview:
-            return LaunchResult(
-                title=popup_text(main.window_text()),
-                structure_ids=tuple(settings.required_auto_ids),
+            if home_content_present(main):
+                return LaunchResult(
+                    title=popup_text(main.window_text()),
+                    structure_ids=tuple(settings.required_auto_ids),
+                )
+            if not content_retried:
+                content_retried = True
+                print("[env] 首页结构就绪但内容空白，点一次首页页签强制重载")
+                click_home_tab(main)
+                time.sleep(1)
+                continue
+            hint = _occlusion_note(pid)
+            evidence = _save_screenshot(main, "blank_home")
+            raise LaunchError(
+                _with_hint(f"首页内容空白 home_content=False；截图: {evidence}", hint),
+                evidence=evidence,
             )
         time.sleep(0.5)
     hint = _occlusion_note(pid)
@@ -611,7 +703,8 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
     leftover = [o.name for o in _overlay_windows(main, settings, main_handle=main_handle, pid=pid)]
     raise LaunchError(
         _with_hint(
-            f"超时未就绪 missing={missing} webview={web} overlays={leftover}；截图: {evidence}",
+            f"超时未就绪 missing={missing} webview={web} home_content={home_content_present(main)} "
+            f"overlays={leftover}；截图: {evidence}",
             hint,
         ),
         evidence=evidence,

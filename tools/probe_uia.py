@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hall_auto.config import REPO_ROOT, load_config
 from hall_auto.launch import _overlay_windows, start_fresh, wait_main_window, wait_until_ready
+from hall_auto.search import _search_box
 from hall_auto.product import stop_main_process
 
 OUT_DIR = REPO_ROOT / "reports" / "probe"
@@ -104,7 +105,7 @@ def probe_search(cfg, keyword: str, tag: str) -> None:
     except Exception as exc:
         print(f"[{tag}] 就绪判定失败，继续探查: {exc}")
 
-    box = main.child_window(auto_id="SearchBarInput", control_type="Edit").wrapper_object()
+    box = _search_box(main)
     box.set_edit_text(keyword)
     time.sleep(1)
     box.type_keys("{ENTER}", set_foreground=True)
@@ -137,7 +138,7 @@ def probe_detail(cfg, keyword: str, title: str, tag: str) -> None:
     except Exception as exc:
         print(f"[{tag}] 就绪判定失败，继续探查: {exc}")
 
-    box = main.child_window(auto_id="SearchBarInput", control_type="Edit").wrapper_object()
+    box = _search_box(main)
     box.set_edit_text(keyword)
     time.sleep(1)
     box.type_keys("{ENTER}", set_foreground=True)

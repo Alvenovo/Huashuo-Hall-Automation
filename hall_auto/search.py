@@ -78,10 +78,19 @@ def visible_titles(main) -> list[str]:
 
 
 def _search_box(main):
+    # main 是 concrete wrapper（UIAWrapper），没有 WindowSpecification 的 child_window；
+    # 按 automation_id 在 Edit 里找，两种 wrapper 都吃得开。
     try:
-        return main.child_window(auto_id=SEARCH_BOX_AUTO_ID, control_type="Edit").wrapper_object()
-    except Exception as exc:
-        raise LaunchError(f"找不到搜索框 {SEARCH_BOX_AUTO_ID}: {exc}") from exc
+        nodes = main.descendants(control_type="Edit")
+    except Exception:
+        nodes = []
+    for node in nodes:
+        try:
+            if node.element_info.automation_id == SEARCH_BOX_AUTO_ID:
+                return node
+        except Exception:
+            continue
+    raise LaunchError(f"找不到搜索框 {SEARCH_BOX_AUTO_ID}")
 
 
 def _edit_value(node) -> str | None:
