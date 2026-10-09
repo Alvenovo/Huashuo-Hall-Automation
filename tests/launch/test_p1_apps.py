@@ -31,7 +31,7 @@ from hall_auto.launch import (
     wait_until_ready,
 )
 from hall_auto.login import logged_in, login_with_password, logout
-from hall_auto.product import _file_version, is_admin, stop_main_process
+from hall_auto.product import _file_version, is_admin, public_net_reachable, stop_main_process
 from hall_auto.version import four_segment
 from hall_auto.winapi import occlusion_hint, window_state_facts
 
@@ -98,7 +98,21 @@ def test_update_fixture_via_hall(cfg, ready_main):
         pytest.skip(f"起点不是钉住版本 {uf.pinned_version}（当前 {entry}），先提权跑 tools/reset_fixture.py")
 
     button = update_item_button(ready_main, uf.name)
-    assert button is not None, f"更新列表里找不到 {uf.name} 的更新按钮（退出「我的」重进也没刷出来）"
+    if button is None:
+        # 2026-10-09 节点实测：起点干净、重进两次，更新列表里只有微信没有 7-Zip；
+        # 控制机（有外网）同一时刻 7-Zip（64位）在列。第三方条目疑似联网取目录，
+        # 离线节点上静默消失 —— 那是环境能力，不是产品缺陷，fail 只会烧一轮农场往返。
+        # 公网可达还缺条目才是产品扫描问题，照旧 fail 拿截图找开发。
+        if not public_net_reachable():
+            pytest.skip(
+                f"更新列表里没有 {uf.name} 且本机公网不可达：大厅第三方更新目录疑似联网取，"
+                "离线节点缺这条（微信走大厅自家服务所以还在）。非产品缺陷；"
+                "要验更新流给节点开外网，或在有外网的机器提权跑。"
+            )
+        raise AssertionError(
+            f"更新列表里找不到 {uf.name} 的更新按钮（退出「我的」重进也没刷出来），"
+            "且公网可达 —— 像是产品扫描/目录问题，拿本用例截图找开发"
+        )
     assert _press_button(button), f"点不动 {uf.name} 的更新按钮"
 
     deadline = time.time() + cfg.timeouts.install_sec

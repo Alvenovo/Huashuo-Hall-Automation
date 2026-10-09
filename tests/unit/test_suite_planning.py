@@ -164,7 +164,11 @@ def test_plan_shards_dict_shape():
 # `install` / `apps-lifecycle` 曾经也在这儿，理由是「farm_agent 非提权 → 投了必挂」，
 # 现在它们走提权通道（`hall_auto/elevation.py`，计划任务 `HallAutoP1`）执行，
 # 仍然 farm_safe。改这个名单前先读 `hall_auto/suites.py` 里 FULL_RUN_SUITES 上面的理由。
-FULL_RUN_EXCLUDED = {"login-manual"}
+FULL_RUN_EXCLUDED = {
+    "login-manual",
+    # probe 是诊断探针（只读打印三个列表+公网可达性），按需单投，不进每轮全量。
+    "probe",
+}
 
 
 @pytest.mark.unit
@@ -443,3 +447,15 @@ def test_build_command_honours_the_evidence_env_knob(monkeypatch):
     assert not any(
         a.startswith("--evidence=") for a in suites.build_command(get_suite("launch"))
     ), "空值/空白不该塞一个空的 --evidence= 进去"
+
+
+@pytest.mark.unit
+def test_probe_suite_is_readonly_and_outside_full_run():
+    """probe 是诊断探针：只读、能进农场、但**不进全量档**（别给每轮加一分钟噪音）。"""
+    probe = get_suite("probe")
+    assert probe.farm_safe is True
+    assert probe.needs_elevation is False
+    assert probe.reset_fixture is False
+    assert probe.interactive is False
+    assert "probe" not in suites.FULL_RUN_SUITES
+    assert "test_p0_probe.py" in probe.paths[0]

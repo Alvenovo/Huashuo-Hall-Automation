@@ -406,3 +406,37 @@ def test_retry_after_kill_never_clicks_other_pages(monkeypatch):
     monkeypatch.setattr(apps, "wizard_buttons", lambda hwnd: [_wizard_btn("取消"), _wizard_btn("关闭")])
     monkeypatch.setattr(apps, "_click_hwnd", lambda hwnd: pytest.fail("非重试页不许点"))
     assert apps._retry_after_kill("网易云音乐") is None
+
+
+def _update_fixture_stub():
+    return types.SimpleNamespace(
+        update_fixture=types.SimpleNamespace(
+            configured=True, registry_hint="7-Zip", pinned_version="26.02", name="7-Zip（64位）"
+        )
+    )
+
+
+@pytest.mark.unit
+def test_update_fixture_skips_when_list_misses_fixture_and_offline(monkeypatch):
+    """更新列表缺夹具 + 公网不可达 = 环境能力问题，skip 不 fail（2026-10-09 节点实测）。"""
+    from tests.launch import test_p1_apps as mod
+
+    monkeypatch.setattr(mod, "is_admin", lambda: True)
+    monkeypatch.setattr(mod, "uninstall_entry", lambda hint: {"version": "26.02"})
+    monkeypatch.setattr(mod, "update_item_button", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "public_net_reachable", lambda *a, **k: False)
+    with pytest.raises(pytest.skip.Exception):
+        mod.test_update_fixture_via_hall(_update_fixture_stub(), object())
+
+
+@pytest.mark.unit
+def test_update_fixture_still_fails_when_list_misses_fixture_but_online(monkeypatch):
+    """公网可达还缺条目 = 产品扫描/目录问题，照旧 fail —— skip 口子不能吞真缺陷。"""
+    from tests.launch import test_p1_apps as mod
+
+    monkeypatch.setattr(mod, "is_admin", lambda: True)
+    monkeypatch.setattr(mod, "uninstall_entry", lambda hint: {"version": "26.02"})
+    monkeypatch.setattr(mod, "update_item_button", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "public_net_reachable", lambda *a, **k: True)
+    with pytest.raises(AssertionError):
+        mod.test_update_fixture_via_hall(_update_fixture_stub(), object())

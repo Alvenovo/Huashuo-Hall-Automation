@@ -344,6 +344,29 @@ def stop_images(stems: list[str], timeout_sec: int = 30) -> list[str]:
     return sorted(running)
 
 
+def public_net_reachable(
+    hosts: tuple[str, ...] = ("www.7-zip.org", "www.qq.com"), timeout_sec: float = 4.0
+) -> bool:
+    """公网是否可达：对任一主机建一次 TCP 443 连接（只握手前的一步，不发 HTTP 请求）。
+
+    为什么需要它：大厅「更新应用」列表里**第三方工具**（7-Zip / Python3 / 飞书）的条目
+    疑似要联网取目录 —— 2026-10-09 节点 LAPTOP-J0ONB3UN 实测：注册表起点 26.02 干净、
+    重进「我的」两次，更新列表里只有微信；控制机（有外网）同一时刻 7-Zip（64位）在列。
+    「离线节点第三方条目静默消失」这条因果由 `probe` 套件在节点上取证（lists + 本探针）。
+
+    任一主机连上即 True；全连不上才 False（DNS 失败也算不可达）。
+    """
+    import socket
+
+    for host in hosts:
+        try:
+            with socket.create_connection((host, 443), timeout=timeout_sec):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def stop_main_process(timeout_sec: int = 30) -> None:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:

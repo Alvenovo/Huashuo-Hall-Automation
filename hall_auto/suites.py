@@ -131,6 +131,13 @@ SUITES: dict[str, Suite] = {
         parallel="full",
         needs="本机已装大厅；不需要管理员",
     ),
+    "probe": Suite(
+        name="probe",
+        paths=("tests/launch/test_p0_probe.py",),
+        marker=MARKER_LAUNCH,
+        parallel="full",
+        needs="本机已装大厅；只读探针，不点按钮不装不卸不登录",
+    ),
     "apps-lifecycle": Suite(
         name="apps-lifecycle",
         paths=("tests/launch/test_p1_apps.py",),
