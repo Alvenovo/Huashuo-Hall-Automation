@@ -937,3 +937,31 @@ def test_bind_popup_closes_the_dialog_when_the_code_keeps_being_rejected():
         with pytest.raises(login.CodeRejected):
             login.handle_bind_phone_popup(1, "13800000000", lambda _p: "123456")
     assert closed, "重试耗尽后必须把模态弹窗收掉"
+
+
+@pytest.mark.unit
+def test_login_failure_facts_carry_window_texts_and_occlusion(monkeypatch):
+    """提交超时的报错必须带窗内文案与遮挡依据 —— 产品的拒绝 toast 只活几秒，截图拍不到。"""
+    monkeypatch.setattr(login, "_windows", lambda pid: [object()])
+    monkeypatch.setattr(login, "_names_of", lambda win: ["密码错误", "登录", ""])
+    monkeypatch.setattr(login, "occlusion_hint", lambda pid: "遮挡=无")
+    monkeypatch.setattr(login, "window_state_facts", lambda pid: "hwnd=1 visible=True")
+    facts = login._login_failure_facts(7)
+    assert "密码错误" in facts and "遮挡=无" in facts and "hwnd=1" in facts
+
+
+@pytest.mark.unit
+def test_login_submit_timeout_message_includes_the_facts(monkeypatch):
+    """`提交后未进入已登录态` 不许再裸奔：报错串里要有现场事实。"""
+    monkeypatch.setattr(login, "open_login_dialog", lambda pid: None)
+    monkeypatch.setattr(login, "switch_login_tab", lambda *a, **k: None)
+    monkeypatch.setattr(login, "_by_aid", lambda *a, **k: mock.MagicMock())
+    monkeypatch.setattr(login, "_check_agree", lambda pid: None)
+    monkeypatch.setattr(login, "_by_name", lambda *a, **k: mock.MagicMock())
+    monkeypatch.setattr(login, "_press_button", lambda button: True)
+    monkeypatch.setattr(login, "logged_in", lambda pid: False)
+    monkeypatch.setattr(login, "_login_failure_facts", lambda pid: "窗内文案: 操作频繁")
+    monkeypatch.setattr(login, "LOGIN_SUBMIT_TIMEOUT_SEC", 0)
+    with pytest.raises(login.LaunchError) as exc:
+        login.login_with_password_value(7, "19500000000", "x")
+    assert "操作频繁" in str(exc.value)

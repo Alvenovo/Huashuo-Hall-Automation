@@ -538,7 +538,23 @@ def login_with_password_value(pid: int, user: str, password: str) -> str:
         if logged_in(pid):
             return popup_text(_by_aid(pid, "Button", "UserInfoPart").element_info.name)
         time.sleep(0.5)
-    raise LaunchError("登录：提交后未进入已登录态")
+    raise LaunchError(f"登录：提交后未进入已登录态；{_login_failure_facts(pid)}")
+
+
+def _login_failure_facts(pid: int) -> str:
+    """登录失败的现场事实：窗内非空控件名（抓错误 toast / 行内提示）+ 遮挡结论与依据。
+
+    2026-10-09 教训：`登录：提交后未进入已登录态` 后面**一个字现场都没有**，
+    而产品的拒绝提示是几秒即消的 toast —— 超时截图拍不到，人只能对着干净弹窗猜，
+    节点两轮农场往返烧掉才想到该把窗内文案引出来。toast 文案进不了截图，但进得了这里。
+    """
+    names: list[str] = []
+    for win in _windows(pid):
+        for name in _names_of(win):
+            if name and name not in names:
+                names.append(name)
+    shown = " | ".join(names[:40]) or "（窗内无非空 name）"
+    return f"窗内文案: {shown}；遮挡: {occlusion_hint(pid)}；状态: {window_state_facts(pid)}"
 
 
 def _descendants(win) -> list:
