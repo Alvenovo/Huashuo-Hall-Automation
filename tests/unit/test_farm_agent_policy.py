@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -1065,4 +1066,47 @@ def test_password_roundtrip_prompt_explains_the_two_codes(monkeypatch):
     assert "忘记密码往返" in out
     assert "2 个短信" in out
     assert "skip" in out or "漏测" in out
+
+
+def test_run_suite_resets_fixture_before_pytest_on_direct_path(monkeypatch, tmp_path):
+    """**关键保护**：直跑路径（agent 自身已提权）也必须先复位夹具。
+
+    复位原来只写在 elevated_runner 里，agent 在管理员窗口直跑时整步被跳过，
+    上一轮装剩的夹具让真装真卸用例连跳两轮 skip（节点 1447/1454 实踩）。
+    """
+    from hall_auto.suites import Suite
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(
+        farm_agent, "subprocess", types.SimpleNamespace(run=fake_run, STDOUT=-1)
+    )
+    monkeypatch.setattr(
+        farm_agent,
+        "get_suite",
+        lambda name: Suite(name=name, paths=(), marker="", reset_fixture=True),
+    )
+    monkeypatch.setattr(farm_agent, "build_command", lambda suite, shard, of, basetemp: ["tests/x.py"])
+    monkeypatch.setattr(farm_agent, "build_suite_env", lambda task_env, node_env_path: ({}, []))
+    monkeypatch.setattr(
+        farm_agent,
+        "credential_status",
+        lambda env: {
+            "password_login": False,
+            "microsoft_sso": False,
+            "change_password": False,
+            "share_creds": False,
+        },
+    )
+
+    rc, _creds = farm_agent.run_suite("apps-lifecycle", 1, 1, tmp_path / "t.log")
+
+    assert rc == 0
+    assert len(calls) == 2, f"复位 + pytest 各一次：{calls}"
+    assert "tools/reset_fixture.py" in " ".join(calls[0])
+    assert "pytest" in " ".join(calls[1])
 

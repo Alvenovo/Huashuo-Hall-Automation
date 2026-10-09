@@ -331,6 +331,21 @@ def run_suite(
     env, notes = build_suite_env(task_env=task_env, node_env_path=NODE_ENV_PATH)
     creds = credential_status(env)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    if suite.reset_fixture:
+        # 直跑路径（agent 自身已提权）原来漏了复位：提权段的 reset 只写在
+        # elevated_runner 里，节点 1447/1454 轮装卸用例因此连跳两轮 skip。
+        # 顺序与提权段一致：先复位再 pytest；复位失败不拦跑，用例侧有 skip 兜底。
+        reset_argv = [str(py), "-u", "tools/reset_fixture.py"]
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n===== {datetime.now().isoformat(timespec='seconds')} 复位夹具 =====\n")
+            fh.write(f"[env] $ {' '.join(reset_argv)}\n")
+            fh.flush()
+            reset = subprocess.run(
+                reset_argv, cwd=str(REPO_ROOT), env=env,
+                stdout=fh, stderr=subprocess.STDOUT, check=False,
+            )
+            fh.write(f"[env] reset exit={reset.returncode}\n")
+            fh.flush()
     header = (
         f"\n===== {datetime.now().isoformat(timespec='seconds')} {' '.join(argv)} =====\n"
         + "".join(f"[env] {note}\n" for note in notes)
