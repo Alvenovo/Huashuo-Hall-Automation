@@ -509,3 +509,33 @@ def test_home_content_present_false_when_webview_blank():
 @pytest.mark.unit
 def test_home_content_present_never_raises_when_uia_is_broken():
     assert launch.home_content_present(_BoomNode()) is False
+
+
+# --------- 主窗口句柄冻在过渡窗上时，真主窗口会被报成「未知弹窗」（2026-10-09 节点 install）
+
+
+def _main_like_node(*aids: str):
+    node = _NavNode("华硕大厅", control_type="Window")
+    for aid in aids:
+        node._children.append(_NavNode("", control_type="Edit", aid=aid, parent=node))
+    return node
+
+
+@pytest.mark.unit
+def test_looks_like_main_window_true_when_full_structure_present():
+    settings = load_config().launch
+    node = _main_like_node(*settings.required_auto_ids)
+    assert launch._looks_like_main_window(node, settings) is True
+
+
+@pytest.mark.unit
+def test_looks_like_main_window_false_when_structure_incomplete():
+    settings = load_config().launch
+    node = _main_like_node(settings.required_auto_ids[0])
+    assert launch._looks_like_main_window(node, settings) is False
+
+
+@pytest.mark.unit
+def test_looks_like_main_window_false_when_uia_is_broken():
+    settings = load_config().launch
+    assert launch._looks_like_main_window(_BoomNode(), settings) is False

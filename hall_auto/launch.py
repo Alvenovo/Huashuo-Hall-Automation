@@ -637,6 +637,29 @@ def home_content_present(main) -> bool:
     return False
 
 
+def _looks_like_main_window(node, settings: LaunchSettings) -> bool:
+    """覆盖层子树里齐了主结构 id（SearchBarInput/TabList/MainWeb）= 它才是真主窗口。
+
+    主窗口句柄可能冻在**过渡窗**上：splash/启动卡片先出现、随即自毁，真主窗口后出现，
+    就被顶层窗枚举当成「未知弹窗」。2026-10-09 节点 install 两轮实付（1323/1334）：
+    报错里「弹窗文字」是整棵首页树（wmw001/折扣/壁纸…），`截图: None` = 原句柄已死。
+    这种「未知弹窗」不能报，要把主窗口换绑过去继续等就绪。
+    """
+    aids: set[str] = set()
+    try:
+        nodes = node.descendants()
+    except Exception:
+        return False
+    for child in nodes:
+        try:
+            aid = child.element_info.automation_id
+        except Exception:
+            continue
+        if aid:
+            aids.add(aid)
+    return all(aid in aids for aid in settings.required_auto_ids)
+
+
 def wait_until_ready(cfg: Config, main) -> LaunchResult:
     settings = cfg.launch
     # handle / pid 是不变量，但 UIA 每次取要 ~1s（实测），就绪循环每轮都跑覆盖层
@@ -657,6 +680,16 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
         dismiss_whitelist_popups(overlays, settings)
         unknown = [o for o in overlays if is_unknown(o, settings)]
         if unknown:
+            real = next((o for o in unknown if _looks_like_main_window(o.node, settings)), None)
+            if real is not None:
+                try:
+                    main_handle = real.node.handle
+                except Exception:
+                    main_handle = None
+                main = real.node
+                print("[env] 主窗口句柄冻在过渡窗上，已换绑到真主窗口继续等就绪")
+                time.sleep(0.5)
+                continue
             # 依据先取：截图会 set_focus，把大厅提到前台后就量不出遮挡了
             hint = _occlusion_note(pid)
             # 弹窗**文字**必须带上 —— 名字（`Splash`）说明不了任何事，文字才是真因
