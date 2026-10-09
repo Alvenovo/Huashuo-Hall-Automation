@@ -12,6 +12,7 @@ from hall_auto.login import (
     _by_aid,
     _by_name,
     ask_code_until_accepted,
+    bring_microsoft_to_front,
     close_microsoft_login,
     dismiss_bind_dialog,
     find_bind_dialog,
@@ -24,6 +25,7 @@ from hall_auto.login import (
     logged_in,
     logout,
     microsoft_pick_account,
+    microsoft_scene_facts,
     microsoft_send_code,
     open_forgot_password_page,
     open_login_dialog,
@@ -251,7 +253,15 @@ def test_microsoft_login_sso(cfg, ready_pid):
                 "收码 + 绑定流程见 test_microsoft_login_code_manual（-m manual）。"
                 "**根治办法：手工把微软账号绑一次手机号**，之后这条就能无人值守跑通。"
             )
-        name = wait_microsoft_logged_in(ready_pid)
+        # 超时不再只报一句「未进入已登录态」：先把微软窗现场拼进报错、把窗提到前台
+        # （终态全屏截图否则只拍到大厅），控件树由 microsoft_scene_facts 落盘。
+        # 2026-09-29 真机那轮就是没留证，定性只能靠猜。
+        try:
+            name = wait_microsoft_logged_in(ready_pid)
+        except LaunchError as exc:
+            scene = microsoft_scene_facts(ready_pid)
+            bring_microsoft_to_front(ready_pid)
+            pytest.fail(f"{exc}\n  微软窗现场：{scene}")
         assert logged_in(ready_pid), "SSO 后仍未进入已登录态"
         assert "已登录" in name, f"已登录态用户区文案异常: {name!r}"
     finally:

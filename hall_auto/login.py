@@ -1020,6 +1020,47 @@ def _microsoft_login_failure(pid: int, ms_win) -> LaunchError:
     return LaunchError(f"微软登录：提交后未进入已登录态\n  ⚠️ {detail}")
 
 
+def _find_microsoft_window_now(pid: int):
+    """当前还活着的微软登录窗（本进程内嵌 webBrowser 的顶层窗）；没有返回 None。
+
+    与 `_wait_microsoft_window` 同一套认窗口径，只是**只探一次不等** —— 留给
+    失败留证用，等下去会把"窗已经没了"这个事实本身等丢。
+    """
+    for h in _top_hwnds():
+        if not _hwnd_visible(h) or _hwnd_pid(h) != pid:
+            continue
+        try:
+            win = UIAWrapper(UIAElementInfo(h))
+        except Exception:
+            continue
+        if _ms_by_aid(win, "webBrowser") is not None:
+            return win
+    return None
+
+
+def microsoft_scene_facts(pid: int) -> str:
+    """等不到已登录态时，微软窗的现场一句话：窗还在不在 + 停在哪一页。
+
+    2026-09-29 真机加的：SSO 点完缓存账号磁贴后超时，终态全屏截图里微软窗被大厅
+    主窗整个挡在后面，人拿不到任何证据只能猜。窗还在 → 拼它页面文案（停在密码页 /
+    同意页 / 转圈一眼可见）并落一棵控件树；窗没了 → 说明 MS 侧自己关了窗，
+    卡点在大厅接到回调之后，方向完全相反。
+    """
+    win = _find_microsoft_window_now(pid)
+    if win is None:
+        return "微软登录窗已不在（MS 侧窗自己关了）—— 卡点在大厅接到回调之后"
+    names = [n.strip() for n in _names_of(win) if n.strip()]
+    tree = dump_microsoft_tree(win, "sso_timeout_scene")
+    tail = f"；控件树: {tree}" if tree else ""
+    return f"微软窗还在，页面文案: {' | '.join(names)[:600]}{tail}"
+
+
+def bring_microsoft_to_front(pid: int) -> bool:
+    """失败留证前把微软窗提到前台：终态截图是全屏的，不提上来拍到的只有大厅。"""
+    win = _find_microsoft_window_now(pid)
+    return _bring_to_front(win) if win is not None else False
+
+
 def wait_microsoft_logged_in(pid: int, ms_win=None, timeout_sec: float | None = None) -> str:
     """SSO/提交后等回大厅已登录态，返回用户区文案。
 

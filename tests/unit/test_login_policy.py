@@ -768,6 +768,30 @@ def test_microsoft_bind_wait_timeout_keeps_the_same_diagnosis():
     assert type(exc.value) is login.CodeRejected, f"应该是可重试的 CodeRejected，实际 {type(exc.value)}"
 
 
+@pytest.mark.unit
+def test_sso_scene_facts_point_at_the_hall_when_the_ms_window_is_gone():
+    """窗没了 = MS 侧自己关的，卡点在大厅接回调之后 —— 方向不能写反。"""
+    with mock.patch.object(login, "_find_microsoft_window_now", return_value=None):
+        facts = login.microsoft_scene_facts(1)
+    assert "已不在" in facts and "大厅接到回调之后" in facts, facts
+
+
+@pytest.mark.unit
+def test_sso_scene_facts_carry_the_page_text_and_a_tree_dump():
+    """窗还在 = 把它停在哪一页写进报错，并落一棵控件树备查。"""
+    node = mock.Mock()
+    node.element_info.name = "请输入密码"
+    win = mock.Mock()
+    win.descendants.return_value = [node]
+    with (
+        mock.patch.object(login, "_find_microsoft_window_now", return_value=win),
+        mock.patch.object(login, "dump_microsoft_tree", return_value="reports/ms_ui_dump/x.txt") as dumped,
+    ):
+        facts = login.microsoft_scene_facts(1)
+    assert "请输入密码" in facts and "x.txt" in facts, facts
+    dumped.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # 忘记密码发码：「按钮回到控件树」≠「服务端放行」
 #
