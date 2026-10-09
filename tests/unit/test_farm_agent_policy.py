@@ -1125,6 +1125,7 @@ def test_run_suite_resets_fixture_before_pytest_on_direct_path(monkeypatch, tmp_
     monkeypatch.setattr(
         farm_agent, "subprocess", types.SimpleNamespace(run=fake_run, STDOUT=-1)
     )
+    monkeypatch.setattr(farm_agent, "repo_rev", lambda: "abc1234")
     monkeypatch.setattr(
         farm_agent,
         "get_suite",
@@ -1149,4 +1150,6 @@ def test_run_suite_resets_fixture_before_pytest_on_direct_path(monkeypatch, tmp_
     assert len(calls) == 2, f"复位 + pytest 各一次：{calls}"
     assert "tools/reset_fixture.py" in " ".join(calls[0])
     assert "pytest" in " ".join(calls[1])
+    log_text = (tmp_path / "t.log").read_text(encoding="utf-8")
+    assert "节点 rev=abc1234" in log_text, "共享日志要能认出节点这轮跑的哪版（绿轮没 stdout 可翻）"
 

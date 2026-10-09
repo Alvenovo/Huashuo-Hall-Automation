@@ -348,6 +348,7 @@ def run_suite(
             fh.flush()
     header = (
         f"\n===== {datetime.now().isoformat(timespec='seconds')} {' '.join(argv)} =====\n"
+        f"[env] 节点 rev={repo_rev() or '未知'}\n"
         + "".join(f"[env] {note}\n" for note in notes)
         + "[env] 凭据：密码登录={password_login} 微软SSO={microsoft_sso} "
         "改密码={change_password} 共享盘={share_creds}\n".format(**creds)
@@ -421,6 +422,7 @@ def run_suite_elevated(
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(
             f"\n===== {datetime.now().isoformat(timespec='seconds')} 提权段 {suite_name} =====\n"
+            f"[env] 节点 rev={repo_rev() or '未知'}\n"
             f"[env] 走提权通道：计划任务 {ELEVATION_TASK_NAME}（本进程 admin={is_elevated()}）\n"
             f"[env] pytest 参数：{' '.join(argv)}\n"
             f"[env] 复位夹具：{'是' if suite.reset_fixture else '否'}\n"
