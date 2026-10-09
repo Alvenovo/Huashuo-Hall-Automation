@@ -300,6 +300,46 @@ def test_evidence_name_matches_control_side():
     assert farm_agent.NODE_ENV_EVIDENCE_NAME == NODE_ENV_EVIDENCE_NAME
 
 
+def test_node_env_carries_repo_rev(tmp_path, monkeypatch):
+    """证据里要有节点 rev：绿轮日志没有 captured stdout，事后只能靠它认版本。"""
+    monkeypatch.setattr(farm_agent, "repo_rev", lambda: "6e1ac88")
+    run_dir = tmp_path / "R01_x"
+    run_dir.mkdir()
+    farm_agent._write_node_env(run_dir, "R01", "T1", "launch", {})
+
+    payload = json.loads(
+        (run_dir / farm_agent.NODE_ENV_EVIDENCE_NAME).read_text(encoding="utf-8")
+    )
+    assert payload["repo_rev"] == "6e1ac88"
+
+
+def _fake_git(outputs: list[str]):
+    def run(argv, **kwargs):
+        return types.SimpleNamespace(stdout=outputs.pop(0) if outputs else "", returncode=0)
+
+    return run
+
+
+def test_repo_rev_marks_dirty_and_swallows_git_failure(monkeypatch):
+    """脏工作区要标 +dirty（否则「节点跑的就是这版」是假前提）；git 不在就空串，别炸。"""
+    monkeypatch.setattr(
+        farm_agent.subprocess, "run", _fake_git(["abc1234\n", " M hall_auto/apps.py\n"])
+    )
+    assert farm_agent.repo_rev() == "abc1234+dirty"
+
+    monkeypatch.setattr(farm_agent.subprocess, "run", _fake_git(["abc1234\n", ""]))
+    assert farm_agent.repo_rev() == "abc1234"
+
+    monkeypatch.setattr(farm_agent.subprocess, "run", _fake_git([""]))
+    assert farm_agent.repo_rev() == ""
+
+    def boom(*args, **kwargs):
+        raise OSError("git 不在 PATH")
+
+    monkeypatch.setattr(farm_agent.subprocess, "run", boom)
+    assert farm_agent.repo_rev() == ""
+
+
 # ---------------- 空闲轮询不许静默（"--loop 卡住了"这个假象） ----------------
 #
 # 2026-09-21 首台真机 DESKTOP-DOHED68：`--loop` 启动后打印两行，然后 5 分钟没动静，

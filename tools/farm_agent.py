@@ -662,6 +662,28 @@ def newest_run_dir(exclude: set[str] | None = None) -> Path | None:
     return max(dirs, key=lambda d: d.stat().st_mtime) if dirs else None
 
 
+def repo_rev() -> str:
+    """节点仓库当前 rev（工作区脏则带 `+dirty`）；git 不可用返回空串。
+
+    绿轮日志没有 captured stdout，报错行号又是最后一招 —— rev 不落进证据，
+    事后就只能猜节点这轮跑的是哪版代码（10-09 为这事来回对了好几轮）。
+    """
+    try:
+        rev = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=15, check=False,
+        ).stdout.strip()
+        if not rev:
+            return ""
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=15, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return f"{rev}+dirty" if dirty else rev
+
+
 def _write_node_env(run_dir: Path, node: str, task_id: str, suite: str, creds: dict[str, bool]) -> None:
     """把本轮凭据状态写进证据目录，随证据一起回传。
 
@@ -677,6 +699,7 @@ def _write_node_env(run_dir: Path, node: str, task_id: str, suite: str, creds: d
                     "node": node,
                     "task_id": task_id,
                     "suite": suite,
+                    "repo_rev": repo_rev(),
                     "credentials": creds,
                     "profile": machine_profile(),
                 },
@@ -719,6 +742,7 @@ def execute_suite(
     写凭据 → 回传。复制一份的话，两边的「认错上一轮目录」这类坑迟早只修一边。
     """
     print(f"  跑 {name}（分片 {shard_id}/{shard_count}）", flush=True)
+    print(f"  节点 rev={repo_rev() or '未知'}", flush=True)
     before = evidence_snapshot()   # 先拍快照，避免没产出证据时错认上一轮的目录
     suite = get_suite(name)
     if suite.needs_elevation and not is_elevated():
