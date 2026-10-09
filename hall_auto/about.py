@@ -11,12 +11,15 @@ from hall_auto.config import Config, REPO_ROOT
 from hall_auto.launch import (
     LaunchError,
     _press_button,
+    _save_screenshot,
+    concrete_main,
     start_fresh,
     wait_main_window,
     wait_until_ready,
 )
 from hall_auto.product import stop_main_process
 from hall_auto.waiting import wait_until_or_raise
+from hall_auto.winapi import _hwnd_visible
 
 ABOUT_DIR = REPO_ROOT / "reports" / "about"
 OCR_SCRIPT = REPO_ROOT / "tools" / "ocr_text.ps1"
@@ -67,6 +70,44 @@ def _click_aid(main, aid: str) -> bool:
     return node is not None and _press_button(node)
 
 
+def _button_aids(main) -> list[str]:
+    try:
+        nodes = main.descendants(control_type="Button")
+    except Exception:
+        return []
+    aids: list[str] = []
+    for node in nodes:
+        try:
+            aids.append(node.element_info.automation_id or "")
+        except Exception:
+            continue
+    return aids
+
+
+def _setbtn_note(main) -> str:
+    try:
+        handle = main.handle
+    except Exception:
+        handle = None
+    visible = _hwnd_visible(handle) if handle else False
+    return f"hwnd={handle} 可见={visible} 按钮aid={_button_aids(main)[:24]}"
+
+
+def _rebind_if_stale(cfg: Config, main):
+    """就绪后主窗口句柄仍可能冻在已销毁的过渡窗上：句柄不可见或按钮树空就按 pid 重绑重试；窗活着且有按钮说明 SetBtn 真缺，不重绑。"""
+    try:
+        handle = main.handle
+        pid = main.element_info.process_id
+    except Exception:
+        return None
+    if handle and _hwnd_visible(handle) and _button_aids(main):
+        return None
+    try:
+        return concrete_main(pid, cfg.display_name_contains)
+    except LaunchError:
+        return None
+
+
 def _version_node(main):
     for node in main.descendants(control_type="Text"):
         try:
@@ -115,8 +156,19 @@ def read_about_version(cfg: Config) -> str:
     try:
         main = wait_main_window(app, cfg)
         wait_until_ready(cfg, main)
-        if not _click_aid(main, "SetBtn"):
-            raise LaunchError("关于页：点不到设置按钮 SetBtn")
+        btn = _find_aid(main, "Button", "SetBtn")
+        if btn is None:
+            rebound = _rebind_if_stale(cfg, main)
+            if rebound is not None:
+                print("[env] 关于页：主窗口句柄已失效，重绑后重试 SetBtn")
+                main = rebound
+                btn = _find_aid(main, "Button", "SetBtn")
+        if btn is None or not _press_button(btn):
+            evidence = _save_screenshot(main, "about_setbtn")
+            raise LaunchError(
+                f"关于页：点不到设置按钮 SetBtn；{_setbtn_note(main)}；截图: {evidence}",
+                evidence=evidence,
+            )
         wait_until_or_raise(
             lambda: _find_aid(main, "Button", "AboutBtn") is not None,
             "关于页：点完设置后 AboutBtn 没出现（设置页没打开？）",
