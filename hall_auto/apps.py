@@ -754,6 +754,8 @@ def uninstall_fixture(cfg: Config, main, app_name: str, timeout_sec: int | None 
         raise LaunchError("P1-A：没配卸载夹具应用")
     if not is_app_installed(app_name):
         raise LaunchError(f"P1-A：{app_name} 不在系统卸载列表里，不能当卸载夹具")
+    # 装完自拉起的进程会锁安装目录文件，厂商卸载器弹「重试」错误页干等到超时（节点 1432 轮实踩）
+    kill_fixture_app_procs(app_name)
     button = uninstall_item_button(main, app_name)
     if button is None or not _press_button(button):
         raise LaunchError(

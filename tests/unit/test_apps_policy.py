@@ -358,3 +358,25 @@ def test_install_fixture_kills_running_app_before_touching_the_store(monkeypatch
     with pytest.raises(RuntimeError):
         apps.install_fixture(load_config(), main=object(), app_name="网易云音乐")
     assert order == [("kill", "网易云音乐")]
+
+
+@pytest.mark.unit
+def test_uninstall_fixture_kills_running_app_before_clicking_uninstall(monkeypatch):
+    """**关键保护**：装完自拉起的进程锁目录文件，卸载前不收干净厂商卸载器会弹重试页等超时。"""
+    order = []
+
+    def _record(app_name, timeout_sec=15):
+        order.append(("kill", app_name))
+        raise RuntimeError("stop-here")
+
+    monkeypatch.setattr(apps, "is_app_installed", lambda *a, **k: True)
+    monkeypatch.setattr(apps, "kill_fixture_app_procs", _record)
+    monkeypatch.setattr(
+        apps,
+        "uninstall_item_button",
+        lambda *a, **k: pytest.fail("杀进程必须排在点卸载按钮之前"),
+    )
+
+    with pytest.raises(RuntimeError):
+        apps.uninstall_fixture(load_config(), main=object(), app_name="网易云音乐")
+    assert order == [("kill", "网易云音乐")]
