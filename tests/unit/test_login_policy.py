@@ -959,9 +959,33 @@ def test_login_submit_timeout_message_includes_the_facts(monkeypatch):
     monkeypatch.setattr(login, "_check_agree", lambda pid: None)
     monkeypatch.setattr(login, "_by_name", lambda *a, **k: mock.MagicMock())
     monkeypatch.setattr(login, "_press_button", lambda button: True)
+    monkeypatch.setattr(login, "_capture_submit_toast", lambda: None)
     monkeypatch.setattr(login, "logged_in", lambda pid: False)
     monkeypatch.setattr(login, "_login_failure_facts", lambda pid: "窗内文案: 操作频繁")
     monkeypatch.setattr(login, "LOGIN_SUBMIT_TIMEOUT_SEC", 0)
     with pytest.raises(login.LaunchError) as exc:
         login.login_with_password_value(7, "19500000000", "x")
     assert "操作频繁" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_capture_submit_toast_shots_two_frames_into_evidence_dir(monkeypatch, tmp_path):
+    """提交后必须落两张 toast 截图到证据目录 —— 产品拒绝提示只活几秒，超时截图抓不到。"""
+    monkeypatch.setenv("HALL_EVIDENCE_RUN_DIR", str(tmp_path))
+    shots: list[str] = []
+    monkeypatch.setattr(login, "capture_screen", lambda p: shots.append(p.name) or True)
+    monkeypatch.setattr(login.time, "sleep", lambda s: None)
+    login._capture_submit_toast()
+    assert shots == ["submit_plus_1s.png", "submit_plus_4s.png"]
+    assert (tmp_path / "login_toast").is_dir()
+
+
+@pytest.mark.unit
+def test_capture_submit_toast_is_a_noop_without_evidence_dir(monkeypatch):
+    """本地直跑（没设 HALL_EVIDENCE_RUN_DIR）静默不截，不报错不 sleep。"""
+    monkeypatch.delenv("HALL_EVIDENCE_RUN_DIR", raising=False)
+    called = []
+    monkeypatch.setattr(login, "capture_screen", lambda p: called.append(p))
+    monkeypatch.setattr(login.time, "sleep", lambda s: called.append(s))
+    login._capture_submit_toast()
+    assert called == []

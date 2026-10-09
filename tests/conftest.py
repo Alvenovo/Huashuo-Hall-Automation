@@ -265,6 +265,8 @@ def _wants_screenshot(item) -> bool:
 
 def pytest_configure(config):
     config._evidence = EvidenceSession(new_run_dir(), config.getoption("--evidence"))
+    # login.py 的提交后 toast 截图靠这个变量找证据目录（农场会把整个目录回传共享盘）
+    os.environ["HALL_EVIDENCE_RUN_DIR"] = str(config._evidence.run_dir)
 
 
 @pytest.hookimpl(hookwrapper=True)

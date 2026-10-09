@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import time
+from pathlib import Path
 
 import win32gui
 import win32process
@@ -8,6 +10,7 @@ from pywinauto.controls.uiawrapper import UIAWrapper
 from pywinauto.uia_element_info import UIAElementInfo
 
 from hall_auto.config import Config
+from hall_auto.evidence import capture_screen
 from hall_auto.launch import LaunchError, _press_button, popup_text
 from hall_auto.waiting import wait_until, wait_until_or_raise
 from hall_auto.winapi import (
@@ -533,12 +536,31 @@ def login_with_password_value(pid: int, user: str, password: str) -> str:
     submit = _by_name(pid, "Button", "登录", exact=True)
     if submit is None or not _press_button(submit):
         raise LaunchError("登录：点不到登录按钮")
+    _capture_submit_toast()
     deadline = time.time() + LOGIN_SUBMIT_TIMEOUT_SEC
     while time.time() < deadline:
         if logged_in(pid):
             return popup_text(_by_aid(pid, "Button", "UserInfoPart").element_info.name)
         time.sleep(0.5)
     raise LaunchError(f"登录：提交后未进入已登录态；{_login_failure_facts(pid)}")
+
+
+def _capture_submit_toast() -> None:
+    """提交后 1.5s / 4s 各截一张屏：产品的拒绝提示只活几秒，超时截图永远拍不到。
+
+    2026-10-09 节点五连红的教训：超时终态截图里弹窗干干净净，窗内 UIA 文案 dump 也
+    干净 —— 但**纯 div toast 可能根本不在 UIA 树里**，两类证据都抓不到它，只有提交后
+    几秒内的截图能留证。落盘目录 = `HALL_EVIDENCE_RUN_DIR`（conftest 在 pytest_configure
+    设），农场 agent 会连证据目录一起回传共享盘；没设（本地直跑）就静默不截。
+    """
+    out = os.environ.get("HALL_EVIDENCE_RUN_DIR")
+    if not out:
+        return
+    dir_ = Path(out) / "login_toast"
+    for label, delay in (("submit_plus_1s", 1.5), ("submit_plus_4s", 2.5)):
+        time.sleep(delay)
+        dir_.mkdir(parents=True, exist_ok=True)
+        capture_screen(dir_ / f"{label}.png")
 
 
 def _login_failure_facts(pid: int) -> str:
