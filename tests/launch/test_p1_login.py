@@ -132,54 +132,20 @@ def test_login_dialog_controls(ready_pid):
     assert "PasswordSecInput" not in sms, f"切到短信页签后密码框应消失: {sms}"
 
 
-def _assert_user_area_shows(user: str, name: str) -> None:
-    """断言用户区显示的账号能对应上**登录用的那个手机号**。
-
-    ## 先看清用户区显示的是什么（2026-09-28 更正）
-
-    用户区显示的是**账号昵称**，不是手机号、也不是"绑定号"：
-
-    ```
-    用户信息区域，已登录用户：asus_1883771273
-    ```
-
-    `1883771273` 只有 10 位，**不是合法的国内手机号**（11 位、1 开头）——
-    它是这个账号的昵称。所以「用户区显示的是绑定号」这个 2026-09-23 的定性**是错的**
-    （那轮"换个号就过了"只说明另一个号的**昵称**恰好是手机号，证明不了显示的是绑定号）。
-
-    ## 所以这条断言的真实前提
-
-    它其实在断言：**这个账号的昵称里含登录手机号的尾号**。
-    那是**账号数据**，不是产品不变量 —— 昵称是用户可以随便改的。
-
-    失败时的正确处置（按顺序）：
-      1. **换一个昵称就是手机号的测试号**（最省事，`HALL_TEST_USER` 换掉即可）；
-      2. 或在 App 里把这个号的昵称改成登录手机号；
-      3. 真要长期用「昵称任意」的号，就得给一个**显式的期望昵称**（配置项），
-         别再从手机号尾号反推 —— 那是猜。
-
-    断言本身保留：它仍是"登录进去的是不是我们要的那个账号"的唯一检查，
-    只是**别再把失败读成"产品缺陷"或"绑错号"**。登录是成功的。
-    """
-    assert user[-5:] in name, (
-        f"已登录态的用户区没带登录手机号的尾号：显示 {name!r}，期望含 {user[-5:]!r}。\n"
-        "  · **登录是成功的**，失败的是这条「账号对不对」的检查 —— 别当产品缺陷报。\n"
-        "  · 用户区显示的是**账号昵称**（如 asus_1883771273），不是手机号、也不是绑定号。\n"
-        "  · 正解：换一个**昵称就是登录手机号**的测试号（或把该号昵称改成手机号）。\n"
-        "  详见《运行手册.md》「坑 13」。"
-    )
-
-
 @pytest.mark.login
 def test_password_login_success(cfg, ready_pid):
-    """P1-B 账号密码登录：填手机号+密码勾选协议登录后进入已登录态，用户区带手机号尾号"""
+    """P1-B 账号密码登录：填手机号+密码勾选协议登录后进入已登录态。
+
+    不核对「用户区显示的是不是登录的那个号」：用户区只显示**账号昵称**（账号数据，
+    可随时被改），认账号就得维护一个期望昵称；2026-10-09 定案不维护（坑 13 撤断言）。
+    起点每条用例先 logout，登录态真假由 `logged_in` 守，见《运行手册.md》坑 13。
+    """
     user, password = cfg.test_account()
     if not (user and password):
         pytest.skip("缺凭据：设置 HALL_TEST_USER / HALL_TEST_PASSWORD")
     logout(ready_pid)
-    name = login_with_password(cfg, ready_pid)
+    login_with_password(cfg, ready_pid)
     assert logged_in(ready_pid)
-    _assert_user_area_shows(user, name)
 
 
 @pytest.mark.login
@@ -367,7 +333,7 @@ def test_sms_login_manual(cfg, ready_pid):
 
     会真发短信。只在交互式终端跑（无人值守时 stdin 不是 tty，自动 skip，
     不会发了短信却没人回填）。手机号走 HALL_TEST_USER，不落盘。
-    2026-09-16 已按此流程人工实跑通过（尾号 1935，回填后进入已登录态）。
+    2026-09-16 已按此流程人工实跑通过（回填后进入已登录态）。
 
     **登录成功后**如果弹出「绑定手机号」（没绑过的账号才弹），会接着自动
     填号 → 点获取验证码 → 问人要短信码 → 提交（见 `_bind_phone_if_prompted`），
@@ -383,15 +349,14 @@ def test_sms_login_manual(cfg, ready_pid):
     _require_interactive_tty("短信登录要人工回填验证码")
     logout(ready_pid)
     request_sms_code(ready_pid, user)
-    status, name = ask_code_until_accepted(
+    status = ask_code_until_accepted(
         _ask_code,
         lambda code: login_with_sms_code(ready_pid, code),
         what="输入手机收到的短信验证码",
-    )
+    )[0]
     if status != "ok":
         pytest.skip("人工放弃回填（验证码已发出）")
     assert logged_in(ready_pid)
-    _assert_user_area_shows(user, str(name))
     # 同微软那条：没绑过的账号会弹绑定弹窗，必须在 logout 之前处理掉。
     _bind_phone_if_prompted(cfg, ready_pid)
     logout(ready_pid)
