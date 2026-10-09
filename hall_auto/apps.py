@@ -21,7 +21,7 @@ from pathlib import Path
 
 from hall_auto.config import Config
 from hall_auto.launch import LaunchError, _press_button, click_home_tab, popup_text
-from hall_auto.product import is_admin, stop_images
+from hall_auto.product import _running_image_names, is_admin, stop_images
 from hall_auto.search import open_detail_until_ready, search_hits
 from hall_auto.waiting import wait_until, wait_until_or_raise
 from hall_auto.winapi import (
@@ -748,6 +748,23 @@ def update_item_button(main, app_name: str, timeout_sec: int = 40):
     return _item_action_button(main, app_name, "update", timeout_sec)
 
 
+def _retry_after_kill(app_name: str) -> str | None:
+    """卸载器被文件锁挡在「重试」页时：再收一次进程（锁持有者可能是看门狗拉起的）再点重试。
+
+    「重试」故意不进 WIZARD_BUTTONS：锁没释放就点重试只是空转循环。
+    """
+    for hwnd in installer_dialogs(app_name):
+        for btn in wizard_buttons(hwnd):
+            if btn.visible and btn.enabled and button_label(btn.text) == "重试":
+                try:
+                    kill_fixture_app_procs(app_name)
+                except LaunchError:
+                    pass
+                _click_hwnd(btn.hwnd)
+                return btn.describe()
+    return None
+
+
 def uninstall_fixture(cfg: Config, main, app_name: str, timeout_sec: int | None = None) -> None:
     """从「我的 → 卸载应用」卸夹具应用，断言走注册表。"""
     if not app_name:
@@ -772,14 +789,19 @@ def uninstall_fixture(cfg: Config, main, app_name: str, timeout_sec: int | None 
         for label in drive_vendor_installer(app_name, drawn_ok=False):
             if label not in wizard_clicks:
                 wizard_clicks.append(label)
+        retry = _retry_after_kill(app_name)
+        if retry and retry not in wizard_clicks:
+            wizard_clicks.append(retry)
         if not is_app_installed(app_name):
             dismiss_vendor_dialogs(app_name)
             return
         time.sleep(1)
     dump = dump_wizard_windows(app_name)
+    hints = fixture_proc_hints(app_name)
+    running = sorted({n for n in _running_image_names() if any(h in n.lower() for h in hints)})
     raise LaunchError(
         f"P1-A：{app_name} 卸载超时，注册表里还在；厂商向导点过 {wizard_clicks}；"
-        f"当前向导 {wizard_snapshot(app_name)}；全量窗口已落盘 {dump}"
+        f"仍跑着的夹具进程 {running}；当前向导 {wizard_snapshot(app_name)}；全量窗口已落盘 {dump}"
     )
 
 

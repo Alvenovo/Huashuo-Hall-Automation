@@ -380,3 +380,29 @@ def test_uninstall_fixture_kills_running_app_before_clicking_uninstall(monkeypat
     with pytest.raises(RuntimeError):
         apps.uninstall_fixture(load_config(), main=object(), app_name="网易云音乐")
     assert order == [("kill", "网易云音乐")]
+
+
+def _wizard_btn(text, hwnd=7):
+    return apps.WizardButton(hwnd=hwnd, text=text, rect=(0, 0, 10, 10), visible=True, enabled=True)
+
+
+@pytest.mark.unit
+def test_retry_after_kill_kills_before_clicking_retry(monkeypatch):
+    """**关键保护**：「重试」页必须先再收一次进程再点 —— 锁持有者可能是看门狗拉起的，
+    不杀就点重试只是空转（节点 1503 轮：杀过一次仍被_watchdog_拉起的应用锁挡）。"""
+    order = []
+    monkeypatch.setattr(apps, "installer_dialogs", lambda name: [1])
+    monkeypatch.setattr(apps, "wizard_buttons", lambda hwnd: [_wizard_btn("重试")])
+    monkeypatch.setattr(apps, "kill_fixture_app_procs", lambda name, **k: order.append("kill"))
+    monkeypatch.setattr(apps, "_click_hwnd", lambda hwnd: order.append(("click", hwnd)))
+    assert apps._retry_after_kill("网易云音乐") is not None
+    assert order == ["kill", ("click", 7)]
+
+
+@pytest.mark.unit
+def test_retry_after_kill_never_clicks_other_pages(monkeypatch):
+    """反向锁：取消/关闭等别的页一律不碰，点错可能把卸载撤了。"""
+    monkeypatch.setattr(apps, "installer_dialogs", lambda name: [1])
+    monkeypatch.setattr(apps, "wizard_buttons", lambda hwnd: [_wizard_btn("取消"), _wizard_btn("关闭")])
+    monkeypatch.setattr(apps, "_click_hwnd", lambda hwnd: pytest.fail("非重试页不许点"))
+    assert apps._retry_after_kill("网易云音乐") is None
