@@ -187,6 +187,45 @@ def region_frames_changed(region: EntryRegion, seconds: float = 3.0, interval: f
     return changed_frames, total_frames
 
 
+def _install_button_node(main):
+    """WB 详情页「一键安装」按钮节点（可见、有面积）；没有返回 None。"""
+    for node in main.descendants():
+        try:
+            text = (node.window_text() or "").strip()
+            rect = node.rectangle()
+        except Exception:
+            continue
+        if INSTALL_BUTTON_TEXT in text and rect.width() > 0 and rect.height() > 0:
+            return node
+    return None
+
+
+def install_button_visible(main) -> bool:
+    """「一键安装」按钮当前还在不在。在 = 下载/安装**没开始**（按钮一旦进入
+    下载态会换文案/消失）—— 给"点了没反应就补点一次"当判据。"""
+    return _install_button_node(main) is not None
+
+
+def install_area_hint(texts) -> str:
+    """从一页可见文案里挑出安装区相关的几句（失败留证用）。纯函数，好测。"""
+    keys = ("一键安装", "下载", "安装中", "取消", "失败", "重试", "暂停", "继续")
+    hits = [t.strip() for t in texts if t and t.strip() and len(t.strip()) < 40 and any(k in t for k in keys)]
+    return " | ".join(dict.fromkeys(hits))[:300]
+
+
+def visible_texts(main) -> list[str]:
+    """主窗所有节点的可见文案（清洗过、去空）。失败留证拼现场用。"""
+    out: list[str] = []
+    for node in main.descendants():
+        try:
+            text = (node.window_text() or "").strip()
+        except Exception:
+            continue
+        if text:
+            out.append(text)
+    return out
+
+
 def click_install_button(main, timeout_sec: float = 15) -> bool:
     """破坏性行 25 用例专用：等 WB 详情页「一键安装」出现并按热区中心点它。
 
@@ -195,15 +234,11 @@ def click_install_button(main, timeout_sec: float = 15) -> bool:
     """
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        for node in main.descendants():
-            try:
-                text = (node.window_text() or "").strip()
-                rect = node.rectangle()
-            except Exception:
-                continue
-            if INSTALL_BUTTON_TEXT in text and rect.width() > 0 and rect.height() > 0:
-                mouse.click(button="left", coords=((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2))
-                return True
+        node = _install_button_node(main)
+        if node is not None:
+            rect = node.rectangle()
+            mouse.click(button="left", coords=((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2))
+            return True
         time.sleep(0.5)
     return False
 

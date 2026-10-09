@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from hall_auto.entries import _is_entry_label
+from hall_auto.entries import _is_entry_label, install_area_hint
 
 pytestmark = pytest.mark.unit
 
@@ -31,3 +31,15 @@ def test_long_description_rejected():
 def test_empty_rejected():
     assert not _is_entry_label("")
     assert not _is_entry_label("   ")
+
+
+def test_install_area_hint_picks_only_install_region_lines():
+    texts = ["一键安装", "下载中 45%", "应用介绍", "11111111111111", "", "   ", "下载" + "x" * 50]
+    hint = install_area_hint(texts)
+    assert "一键安装" in hint and "下载中 45%" in hint
+    assert "应用介绍" not in hint and "1111" not in hint, hint
+
+
+def test_install_area_hint_dedups_and_stays_silent_when_unrelated():
+    assert install_area_hint(["一键安装", "一键安装"]) == "一键安装"
+    assert install_area_hint(["应用介绍", "版本", "免费"]) == ""

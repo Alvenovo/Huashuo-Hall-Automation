@@ -266,6 +266,8 @@ def test_wb_installed_entry_launches_wb(hall):
         assert entries.click_install_button(main), "详情页里找不到可点的「一键安装」按钮"
 
         clicked: list[str] = []
+        started = time.time()
+        reclicked = False
         deadline = time.time() + WB_INSTALL_TIMEOUT
         while time.time() < deadline:
             if apps.is_app_installed(entries.WB_REGISTRY_HINT):
@@ -273,12 +275,20 @@ def test_wb_installed_entry_launches_wb(hall):
             for label in apps.drive_vendor_installer(entries.WB_REGISTRY_HINT):
                 if label not in clicked:
                     clicked.append(label)
+            # 2026-09-29 真机：坐标点 WebView 按钮会失手（点了没反应、按钮还在、
+            # 安装器永远不起来）。20s 后按钮**还在**= 下载/安装没开始，补点一次；
+            # 按钮已换态/消失就绝不补，避免打断正在走的下载。
+            if not reclicked and time.time() - started > 20 and entries.install_button_visible(main):
+                if entries.click_install_button(main, timeout_sec=5):
+                    reclicked = True
+                    clicked.append("一键安装(补点)")
             time.sleep(1)
         apps.dismiss_vendor_dialogs(entries.WB_REGISTRY_HINT)
         assert apps.is_app_installed(entries.WB_REGISTRY_HINT), (
             f"{WB_INSTALL_TIMEOUT}s 内 WB 未装上（注册表无 DisplayName）；向导点过 {clicked}；"
             f"当前向导标题 {apps.installer_titles(entries.WB_REGISTRY_HINT)}；"
-            f"快照 {apps.wizard_snapshot(entries.WB_REGISTRY_HINT)}"
+            f"快照 {apps.wizard_snapshot(entries.WB_REGISTRY_HINT)}；"
+            f"安装区现状 {entries.install_area_hint(entries.visible_texts(main))!r}"
         )
         installed_here = True
 
