@@ -19,6 +19,7 @@ from hall_auto.winapi import (
     _top_hwnds,
     ensure_window_shown,
     occlusion_hint,
+    wheel_at,
 )
 
 REPORTS_DIR = REPO_ROOT / "reports" / "launch"
@@ -272,11 +273,106 @@ def is_unknown(overlay: Overlay, settings: LaunchSettings) -> bool:
     return not (is_whitelisted(overlay.name, settings) or overlay.first_run)
 
 
+_NAV_ANCHOR_NAMES = ("壁纸", "分类", "我的")
+
+
+def _nav_list_from(named_items: list) -> object | None:
+    """左侧导航 List 容器：用「壁纸/分类/我的」这几个登录态也不改名的页签锚定。
+
+    首页页签登录态显示账号昵称（实测 wmw001），不能拿名字认导航；而壁纸/分类/我的
+    在未登录、登录两种态下都叫这个名。
+    """
+    for node, name in named_items:
+        if name not in _NAV_ANCHOR_NAMES:
+            continue
+        try:
+            parent = node.parent()
+            info = parent.element_info
+        except Exception:
+            continue
+        if info is not None and info.control_type == "List":
+            return parent
+    return None
+
+
+def _nav_items(nav) -> list:
+    """导航页签按屏幕纵向排序：[(top, name, node)]，读不到的跳过。"""
+    out = []
+    try:
+        nodes = nav.descendants(control_type="ListItem")
+    except Exception:
+        return out
+    for node in nodes:
+        try:
+            name = popup_text(node.element_info.name or node.window_text())
+            top = node.rectangle().top
+        except Exception:
+            continue
+        out.append((top, name, node))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _click_nav_home(nav) -> bool:
+    """导航列表是虚拟化的：选中项不在顶部时首页页签根本不在 UIA 树里。
+
+    节点真机（2026-10-09）落在折扣页时导航滚掉了两行，树里只剩
+    折扣/壁纸/分类/我的，按名字找「推荐」永远落空 → 就绪循环空转 150s。
+    所以先滚回顶（ScrollPattern，不灵就滚轮），再点最上面一项
+    （登录态它是昵称页签，未登录是「推荐」，位置不变）。
+    """
+    items = _nav_items(nav)
+    pick = next((n for _, name, n in items if name == HOME_TAB_NAME), None)
+    if pick is None and items:
+        before = items[0][1]
+        try:
+            nav.iface_scroll.SetScrollPercent(-1.0, 0.0)
+        except Exception:
+            pass
+        time.sleep(0.3)
+        items = _nav_items(nav)
+        pick = next((n for _, name, n in items if name == HOME_TAB_NAME), None)
+        if pick is None and items and items[0][1] == before:
+            rect = nav.rectangle()
+            wheel_at((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2, turns=4)
+            time.sleep(0.4)
+            items = _nav_items(nav)
+            pick = next((n for _, name, n in items if name == HOME_TAB_NAME), None)
+        if pick is None and items:
+            pick = items[0][2]
+    return pick is not None and _press_button(pick)
+
+
+def click_home_tab(main) -> bool:
+    """点左侧导航的首页页签。
+
+    先按名字「推荐」；找不到再按导航容器认（登录态首页页签显示账号昵称，
+    实测 wmw001，按名字永远落空）。
+    """
+    try:
+        items = main.descendants(control_type="ListItem")
+    except Exception:
+        items = []
+    named = []
+    for node in items:
+        try:
+            name = popup_text(node.element_info.name or node.window_text())
+        except Exception:
+            continue
+        if name == HOME_TAB_NAME:
+            return _press_button(node)
+        named.append((node, name))
+    nav = _nav_list_from(named)
+    if nav is None or not _click_nav_home(nav):
+        return False
+    print("[env] 导航里按名字找不到「推荐」，已按导航容器点首页页签")
+    return True
+
+
 def _back_if_subpage(main) -> bool:
     """大厅会恢复上次的页面，点回首页。实测重装后首跑落在设置/关于页（有
-    BackBtn），应用详情页连 BackBtn 都没有，所以三级兜底：aid=BackBtn →
-    名叫「返回」的按钮 → 侧边栏「推荐」页签。"""
-    home = None
+    BackBtn），应用详情页连 BackBtn 都没有，所以多级兜底：aid=BackBtn →
+    名叫「返回」的按钮 → 侧边栏首页页签。"""
     try:
         buttons = main.descendants(control_type="Button")
     except Exception:
@@ -291,19 +387,7 @@ def _back_if_subpage(main) -> bool:
                 return _press_button(node)
         except Exception:
             continue
-    try:
-        items = main.descendants(control_type="ListItem")
-    except Exception:
-        items = []
-    for node in items:
-        try:
-            name = popup_text(node.element_info.name or node.window_text())
-        except Exception:
-            continue
-        if name == HOME_TAB_NAME:
-            home = node
-            break
-    return home is not None and _press_button(home)
+    return click_home_tab(main)
 
 
 def _structure(main, settings: LaunchSettings) -> tuple[set[str], bool]:

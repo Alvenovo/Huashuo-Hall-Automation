@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hall_auto.config import Config
-from hall_auto.launch import HOME_TAB_NAME, LaunchError, _press_button, popup_text
+from hall_auto.launch import LaunchError, _press_button, click_home_tab, popup_text
 from hall_auto.product import is_admin, stop_images
 from hall_auto.search import open_detail_until_ready, search_hits
 from hall_auto.waiting import wait_until, wait_until_or_raise
@@ -715,8 +715,7 @@ def install_fixture(cfg: Config, main, app_name: str, timeout_sec: int | None = 
 
 def _leave_mine(main) -> bool:
     """退回首页，好让下次 open_mine 真的重进一次页面（open_mine 看到 aid=Mine 就直接返回）。"""
-    home = _by_name(main, "ListItem", HOME_TAB_NAME, exact=True)
-    if home is None or not _press_button(home):
+    if not click_home_tab(main):
         return False
     return wait_until(lambda: _by_aid(main, "Custom", MINE_AUTO_ID) is None, timeout_sec=5)
 

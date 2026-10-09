@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 from ctypes import wintypes
 
 _user32 = ctypes.windll.user32
@@ -55,6 +56,17 @@ WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 WM_CLOSE = 0x0010
 SMTO_ABORTIFHUNG = 0x0002
+MOUSEEVENTF_WHEEL = 0x0800
+WHEEL_DELTA = 120
+
+
+def wheel_at(x: int, y: int, turns: int, delta: int = WHEEL_DELTA) -> None:
+    """在屏幕坐标处滚滚轮。给不暴露 UIA ScrollPattern 的自绘列表兜底用。"""
+    _user32.SetCursorPos(x, y)
+    time.sleep(0.2)
+    for _ in range(max(1, turns)):
+        _user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+        time.sleep(0.15)
 
 
 def _top_hwnds() -> list[int]:

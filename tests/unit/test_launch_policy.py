@@ -266,3 +266,152 @@ def test_occlusion_is_measured_before_the_screenshot():
             f"第 {note_line} 行才量遮挡、第 {shot_line} 行就截图了 —— "
             "截图会 set_focus，依据必须更早取"
         )
+
+
+class _NavRect:
+    def __init__(self, top: int):
+        self.top = top
+        self.left = 0
+        self.right = 10
+        self.bottom = top + 10
+
+
+class _NavInfo:
+    def __init__(self, name: str, control_type: str, aid: str = ""):
+        self.name = name
+        self.control_type = control_type
+        self.automation_id = aid
+
+
+class _NavNode:
+    def __init__(self, name, control_type="ListItem", top=0, parent=None, aid=""):
+        self.element_info = _NavInfo(name, control_type, aid)
+        self._top = top
+        self._parent = parent
+        self._children: list["_NavNode"] = []
+        self.pressed: list[str] = []
+        self.scrolled: list[tuple] = []
+        self._on_scroll = None
+        self._no_scroll = False
+
+    def window_text(self):
+        return self.element_info.name
+
+    def rectangle(self):
+        return _NavRect(self._top)
+
+    def parent(self):
+        return self._parent
+
+    def descendants(self, control_type=None):
+        out = []
+        for child in self._children:
+            if control_type is None or child.element_info.control_type == control_type:
+                out.append(child)
+            out.extend(child.descendants(control_type))
+        return out
+
+    def invoke(self):
+        self.pressed.append("invoke")
+
+    @property
+    def iface_scroll(self):
+        if self._no_scroll:
+            raise RuntimeError("不支持 ScrollPattern")
+        outer = self
+
+        class _Scroll:
+            def SetScrollPercent(self, h, v):
+                outer.scrolled.append((h, v))
+                if outer._on_scroll:
+                    outer._on_scroll()
+
+        return _Scroll()
+
+
+def _nav_scene(names_tops, with_home_name=False, hidden_home=None):
+    """造一个左侧导航：List 容器 + 若干页签 ListItem（name, top）。
+
+    hidden_home：虚拟化滚出可视区的首页页签 —— 滚回顶（SetScrollPercent）时才进树。
+    """
+    nav = _NavNode("应用分类", control_type="List")
+    for name, top in names_tops:
+        nav._children.append(_NavNode(name, top=top, parent=nav))
+    if with_home_name:
+        nav._children.insert(0, _NavNode(launch.HOME_TAB_NAME, top=0, parent=nav))
+    if hidden_home:
+        home = _NavNode(hidden_home, top=0, parent=nav)
+
+        def realize():
+            if home not in nav._children:
+                nav._children.insert(0, home)
+
+        nav._on_scroll = realize
+    return nav
+
+
+def _main_with(nav):
+    main = _NavNode("华硕大厅", control_type="Window")
+    main._children.append(nav)
+    return main
+
+
+@pytest.mark.unit
+def test_back_if_subpage_clicks_home_tab_by_name():
+    nav = _nav_scene([("折扣", 100), ("壁纸", 200), ("分类", 300), ("我的", 400)], with_home_name=True)
+    main = _main_with(nav)
+    assert launch._back_if_subpage(main) is True
+    home = nav._children[0]
+    assert home.pressed == ["invoke"]
+    assert nav.scrolled == [], "按名字就能找到「推荐」时不该动滚动"
+
+
+@pytest.mark.unit
+def test_back_if_subpage_scrolls_nav_when_home_tab_not_realized(monkeypatch):
+    """节点真机场景：落在折扣页时导航滚掉了两行，树里只剩 折扣/壁纸/分类/我的，
+    首页页签（登录态是昵称 wmw001）不在 UIA 树里 —— 必须滚回顶再点它。"""
+    wheels = []
+    monkeypatch.setattr(launch, "wheel_at", lambda *a, **k: wheels.append(a))
+    nav = _nav_scene(
+        [("折扣", 200), ("壁纸", 300), ("分类", 400), ("我的", 500)], hidden_home="wmw001"
+    )
+    main = _main_with(nav)
+    assert launch._back_if_subpage(main) is True
+    assert nav.scrolled == [(-1.0, 0.0)], "没把导航滚回顶就点，点到的还是折扣"
+    assert nav._children[0].pressed == ["invoke"], "滚回顶后应点首页页签（昵称）"
+    assert wheels == [], "ScrollPattern 已经把页签滚出来了，不该再动真鼠标"
+
+
+@pytest.mark.unit
+def test_back_if_subpage_falls_back_to_wheel_without_scroll_pattern(monkeypatch):
+    """自绘列表不暴露 ScrollPattern 时退滚轮；滚完仍没「推荐」就点最上面一项。"""
+    wheels = []
+    monkeypatch.setattr(launch, "wheel_at", lambda *a, **k: wheels.append(a))
+    nav = _nav_scene([("wmw001", 100), ("折扣", 200), ("壁纸", 300), ("分类", 400), ("我的", 500)])
+    nav._no_scroll = True
+    main = _main_with(nav)
+    assert launch._back_if_subpage(main) is True
+    assert len(wheels) == 1, "ScrollPattern 不可用必须退滚轮兜底"
+    assert nav._children[0].pressed == ["invoke"]
+
+
+@pytest.mark.unit
+def test_back_if_subpage_gives_up_without_nav_anchors():
+    """只有应用列表（没有 壁纸/分类/我的 锚点）时别乱点 —— 维持原样等超时报真因。"""
+    app_list = _NavNode("列表", control_type="List")
+    app_list._children.append(_NavNode("微信27的10已选择", top=10, parent=app_list))
+    main = _main_with(app_list)
+    assert launch._back_if_subpage(main) is False
+    assert app_list.scrolled == []
+    assert app_list._children[0].pressed == []
+
+
+@pytest.mark.unit
+def test_back_if_subpage_prefers_back_button():
+    nav = _nav_scene([("折扣", 100), ("壁纸", 200), ("分类", 300), ("我的", 400)])
+    back = _NavNode("", control_type="Button", aid="BackBtn", parent=nav.parent() or nav)
+    main = _NavNode("华硕大厅", control_type="Window")
+    main._children.extend([back, nav])
+    assert launch._back_if_subpage(main) is True
+    assert back.pressed == ["invoke"]
+    assert nav.scrolled == []
