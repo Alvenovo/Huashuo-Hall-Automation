@@ -95,15 +95,18 @@ fixture_apps:
 
 # P1-A 更新夹具：钉一个官方老版本，大厅目录里就永远有更新可点。
 # package 是相对 installer_dir 的路径；sha256 防本地包被换；版本号一律运行时读，不写死。
+# **这块进 committed 配置是因为它和机器无关**：bootstrap 只逐台写 installer_dir 等机器绑定字段，
+# 留空则每台新机（含节点）的更新用例永久 skip。包由 bootstrap 第 4 步从共享盘/官方源铺到
+# installer_dir/fixtures/（与 bootstrap 的 FIXTURE_REL 同一路径、同一摘要）。
 update_fixture:
-  name: ""
-  registry_hint: ""
-  pinned_version: ""
-  package: ""
-  sha256: ""
-  url: ""
-  install_dir: ""
-  version_exe: ""
+  name: 7-Zip（64位）   # 大厅更新列表里的目录名，不是注册表 DisplayName（探壳结论记过的坑）
+  registry_hint: 7-Zip
+  pinned_version: '26.02'
+  package: fixtures/7z2602-x64.exe
+  sha256: 6745fa76dc2ea031596d8678f6f6b99c3c1b435b4164a63485adbbc7b8d82ef0
+  url: https://www.7-zip.org/a/7z2602-x64.exe
+  install_dir: C:/Program Files/7-Zip
+  version_exe: 7zFM.exe
 
 # P2 安全验证（组长用例表「安全验证」板块的固定项：安装包数字签名 / 个人空间盘签名 /
 # 控制面板信息 / 签章检查报告）。CheckAppV.exe、SignCheck_v2.ps1 是公司内部工具，
