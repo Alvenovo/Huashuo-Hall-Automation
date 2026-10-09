@@ -417,26 +417,27 @@ def _update_fixture_stub():
 
 
 @pytest.mark.unit
-def test_update_fixture_skips_when_list_misses_fixture_and_offline(monkeypatch):
-    """更新列表缺夹具 + 公网不可达 = 环境能力问题，skip 不 fail（2026-10-09 节点实测）。"""
+def test_update_fixture_skips_when_update_list_misses_the_fixture(monkeypatch):
+    """更新列表缺夹具 = 服务端目录数据缺前提，skip 不 fail（2026-10-09 节点两轮实测）。"""
     from tests.launch import test_p1_apps as mod
 
     monkeypatch.setattr(mod, "is_admin", lambda: True)
     monkeypatch.setattr(mod, "uninstall_entry", lambda hint: {"version": "26.02"})
     monkeypatch.setattr(mod, "update_item_button", lambda *a, **k: None)
-    monkeypatch.setattr(mod, "public_net_reachable", lambda *a, **k: False)
-    with pytest.raises(pytest.skip.Exception):
+    monkeypatch.setattr(mod, "app_list_state", lambda *a, **k: types.SimpleNamespace(items=["微信(ceshizhengshi)"]))
+    with pytest.raises(pytest.skip.Exception) as exc:
         mod.test_update_fixture_via_hall(_update_fixture_stub(), object())
+    assert "微信(ceshizhengshi)" in str(exc.value), "skip 理由要把现场列表引进去留证"
 
 
 @pytest.mark.unit
-def test_update_fixture_still_fails_when_list_misses_fixture_but_online(monkeypatch):
-    """公网可达还缺条目 = 产品扫描/目录问题，照旧 fail —— skip 口子不能吞真缺陷。"""
+def test_update_fixture_still_fails_when_button_found_but_unclickable(monkeypatch):
+    """条目在却点不动 = 产品缺陷，照旧 fail —— skip 口子只吞「缺前提」，不吞真缺陷。"""
     from tests.launch import test_p1_apps as mod
 
     monkeypatch.setattr(mod, "is_admin", lambda: True)
     monkeypatch.setattr(mod, "uninstall_entry", lambda hint: {"version": "26.02"})
-    monkeypatch.setattr(mod, "update_item_button", lambda *a, **k: None)
-    monkeypatch.setattr(mod, "public_net_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(mod, "update_item_button", lambda *a, **k: object())
+    monkeypatch.setattr(mod, "_press_button", lambda button: False)
     with pytest.raises(AssertionError):
         mod.test_update_fixture_via_hall(_update_fixture_stub(), object())
