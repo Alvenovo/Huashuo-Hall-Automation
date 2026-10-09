@@ -14,7 +14,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hall_auto.apps import UNINSTALL_ROOTS, installed_match, installer_pids, uninstall_entry  # noqa: E402
+from hall_auto.apps import (  # noqa: E402
+    UNINSTALL_ROOTS,
+    installed_match,
+    installer_pids,
+    kill_fixture_app_procs,
+    uninstall_entry,
+)
 from hall_auto.config import load_config  # noqa: E402
 
 
@@ -57,6 +63,9 @@ def _entry(app_name: str) -> tuple[str, str] | None:
 
 
 def reset(app_name: str, timeout_sec: int = 300) -> bool:
+    # 跑着的应用进程锁安装目录文件，静默卸载被锁挡失败、注册表留着，
+    # 下一轮真装真卸用例直接 skip（节点 1447 实踩），卸前先收进程。
+    kill_fixture_app_procs(app_name)
     found = _entry(app_name)
     if found is None:
         print(f"{app_name}: 本来就没装，起点已干净")

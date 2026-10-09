@@ -72,3 +72,16 @@ def test_main_does_not_swallow_other_oserrors(monkeypatch):
     monkeypatch.setattr(mod, "kill_leftover_installers", _boom)
     with pytest.raises(OSError):
         mod.main()
+
+
+def test_reset_kills_running_app_before_silent_uninstall(monkeypatch):
+    """**关键保护**：装完自拉起的进程锁安装目录，静默卸载被锁挡失败后注册表留着，
+    下一轮真装真卸用例直接 skip（节点 1447 实踩）。杀进程必须排在查注册表/卸载之前。"""
+    mod = _load_reset_fixture()
+    order = []
+    monkeypatch.setattr(
+        mod, "kill_fixture_app_procs", lambda name, **k: order.append(("kill", name))
+    )
+    monkeypatch.setattr(mod, "_entry", lambda name: order.append(("entry", name)) or None)
+    assert mod.reset("网易云音乐") is True
+    assert order == [("kill", "网易云音乐"), ("entry", "网易云音乐")]
