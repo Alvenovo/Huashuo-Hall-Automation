@@ -8,6 +8,11 @@
 
 ## 硬红线
 
+- **push 必须双通道：`git push origin main` + `git push share main`**。节点测试机的 origin 是
+  共享盘 bare 库 `share`（`C:/hall-packages/repo/hall-auto.git`），**不是 GitHub** ——
+  只 push origin 时节点 `git pull` 恒「already up to date」（2026-10-09 实锤，节点代码因此冻了十天）。
+  节点 pull 完拿 `git log --oneline -1` 与控制机 HEAD 对一眼才算真拉到。
+
 - **密码 / 测试号 / 微软邮箱只走环境变量**（`HALL_TEST_USER` / `HALL_TEST_PASSWORD` / `HALL_TEST_NEW_PASSWORD` / `HALL_MS_USER`），不落盘、不进 git、不写进任何文件。`config.local.yaml` 已在 `.gitignore`。
 - **绝不点这些按钮**：同步页「全部安装」`InstallAllBtn` 及任何条目安装、更新页 `UpdateAllBtn`、任何非夹具条目——列表里全是 QQ/微信/WPS 这类日常软件，点下去就真装一机器。
 - **办公机不要 `--allow-install`**；破坏性用例（`destructive` 标记）必须门禁 + 提权才跑。
