@@ -97,6 +97,25 @@ class SecuritySettings:
         return bool(self.tools_dir)
 
 
+class Secret(str):
+    """凭据专用字符串：`repr()` 打码，其余 str 行为一概不变。
+
+    为什么要有它（2026-10-10 实付）：**pytest 9 起，失败 traceback 默认把每个 frame 的
+    函数参数值渲染出来** —— `_pytest/nodes.py` 里 `funcargs=True` 是硬编码的，
+    `--showlocals` 只管函数体内的局部变量、管不到它。于是凭据只要作为参数传一次，
+    明文就落进 `report.html` / 农场日志，而农场会把它们回传共享盘 → 违反"密码不落盘"红线。
+
+    包一层只改 `repr`：pytest 的 `saferepr` 对非内置类型走 `repr()`，
+    所以参数渲染里只出 `'***'`；比较、切片、encode、交给 pywinauto 输入框，
+    全都按普通 `str` 走。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "'***'"
+
+
 @dataclass(frozen=True)
 class Config:
     installer_dir: Path
@@ -175,15 +194,19 @@ class Config:
         return path if path.is_absolute() else self.installer_dir / path
 
     def test_account(self) -> tuple[str, str]:
-        """凭据优先走环境变量，密码不落盘（规则红线）。"""
+        """凭据优先走环境变量，密码不落盘（规则红线）。
+
+        返回 `Secret`（str 子类、repr 打码）：pytest 失败 traceback 会渲染函数参数值，
+        普通 str 会把明文写进报告 —— 见 `Secret` 的说明。
+        """
         stored = (self.raw.get("accounts") or {}).get("password") or {}
         user = os.environ.get("HALL_TEST_USER") or str(stored.get("user") or "")
         password = os.environ.get("HALL_TEST_PASSWORD") or str(stored.get("password") or "")
-        return user, password
+        return Secret(user), Secret(password)
 
     def new_password(self) -> str:
         """改密码往返用例的临时新密码，只走环境变量，绝不读配置文件、绝不落盘。"""
-        return os.environ.get("HALL_TEST_NEW_PASSWORD") or ""
+        return Secret(os.environ.get("HALL_TEST_NEW_PASSWORD") or "")
 
     def microsoft_account(self) -> str:
         """微软登录邮箱，优先环境变量；committed 的 config.yaml 不放邮箱（仓库公开）。"""

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest import mock
 
@@ -970,14 +971,62 @@ def test_login_submit_timeout_message_includes_the_facts(monkeypatch):
 
 @pytest.mark.unit
 def test_capture_submit_toast_shots_two_frames_into_evidence_dir(monkeypatch, tmp_path):
-    """提交后必须落两张 toast 截图到证据目录 —— 产品拒绝提示只活几秒，超时截图抓不到。"""
+    """提交后必须落两张 toast 截图 + 两份窗口快照 —— 产品拒绝提示只活几秒，超时截图抓不到。"""
     monkeypatch.setenv("HALL_EVIDENCE_RUN_DIR", str(tmp_path))
     shots: list[str] = []
+    dumps: list[str] = []
     monkeypatch.setattr(login, "capture_screen", lambda p: shots.append(p.name) or True)
+    monkeypatch.setattr(login, "_dump_top_windows", lambda p: dumps.append(p.name))
     monkeypatch.setattr(login.time, "sleep", lambda s: None)
     login._capture_submit_toast()
     assert shots == ["submit_plus_1s.png", "submit_plus_4s.png"]
+    assert dumps == ["submit_plus_1s_windows.json", "submit_plus_4s_windows.json"]
     assert (tmp_path / "login_toast").is_dir()
+
+
+@pytest.mark.unit
+def test_dump_top_windows_records_class_pid_and_cursor(monkeypatch, tmp_path):
+    """窗口快照必须带**类名 + pid + 矩形 + 可见性**。
+
+    2026-10-10 就是靠它给那条黑底提示条定归属：`tooltips_class32` 一出现，
+    就说明提示是系统 tooltip（不在大厅的 UIA 树里），而不是产品网页里的元素。
+    """
+    monkeypatch.setattr(login, "_top_hwnds", lambda: [111, 222])
+    monkeypatch.setattr(login, "_hwnd_pid", lambda h: 420 if h == 111 else 999)
+    monkeypatch.setattr(
+        login.win32gui,
+        "GetClassName",
+        lambda h: "tooltips_class32" if h == 111 else "Chrome_WidgetWin_1",
+    )
+    monkeypatch.setattr(
+        login.win32gui,
+        "GetWindowText",
+        lambda h: "syntax error, expect {, actual error, pos 0" if h == 111 else "",
+    )
+    monkeypatch.setattr(login.win32gui, "GetWindowRect", lambda h: (10, 20, 430, 48))
+    monkeypatch.setattr(login.win32gui, "IsWindowVisible", lambda h: h == 111)
+    monkeypatch.setattr(login.win32gui, "GetForegroundWindow", lambda: 222)
+    monkeypatch.setattr(login.win32api, "GetCursorPos", lambda: (5, 6))
+
+    path = tmp_path / "w.json"
+    login._dump_top_windows(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    assert data["foreground"] == "0xde"  # 222
+    assert data["cursor"] == [5, 6]
+    tip = next(w for w in data["windows"] if w["class"] == "tooltips_class32")
+    assert tip["pid"] == 420
+    assert tip["visible"] is True
+    assert tip["rect"] == [10, 20, 430, 48]
+    assert "fastjson" in tip["title"] or "syntax error" in tip["title"]
+
+
+@pytest.mark.unit
+def test_dump_top_windows_is_side_channel_and_never_raises(monkeypatch, tmp_path):
+    """取证是旁路：枚举炸了也不能把用例带崩，更不能留下半个文件。"""
+    monkeypatch.setattr(login, "_top_hwnds", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    login._dump_top_windows(tmp_path / "w.json")  # 不抛
+    assert not (tmp_path / "w.json").exists()
 
 
 @pytest.mark.unit

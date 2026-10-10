@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
 
+import win32api
 import win32gui
 import win32process
 from pywinauto.controls.uiawrapper import UIAWrapper
@@ -561,6 +563,48 @@ def _capture_submit_toast() -> None:
         time.sleep(delay)
         dir_.mkdir(parents=True, exist_ok=True)
         capture_screen(dir_ / f"{label}.png")
+        _dump_top_windows(dir_ / f"{label}_windows.json")
+
+
+def _dump_top_windows(path: Path) -> None:
+    """把此刻**所有顶层窗口**的类名/标题/矩形/可见性/pid 落盘（附带前台窗口与鼠标位置）。
+
+    为什么（2026-10-10）：登录提交后产品会弹一条**黑底提示条**，内容是后端返回的
+    `syntax error, expect {, actual error, pos 0, fastjson-version 1.2.83`，只活 1~4s。
+    截图能拍到它，但窗内 UIA dump 抓不到 —— 它要么不属于大厅 pid，要么压根不在 UIA 树里。
+    全量 EnumWindows 能把它揪出来：`class`（`tooltips_class32`？）+ `pid` 直接给出归属，
+    `rect` 对鼠标位置还能判它是不是跟随光标的 tooltip。
+
+    取证失败绝不能影响用例本身，所以整块吞异常。
+    """
+    try:
+        rows = []
+        for hwnd in _top_hwnds():
+            try:
+                rows.append(
+                    {
+                        "hwnd": hex(hwnd),
+                        "pid": _hwnd_pid(hwnd),
+                        "class": win32gui.GetClassName(hwnd),
+                        "title": win32gui.GetWindowText(hwnd),
+                        "rect": list(win32gui.GetWindowRect(hwnd)),
+                        "visible": bool(win32gui.IsWindowVisible(hwnd)),
+                    }
+                )
+            except Exception:
+                continue
+        try:
+            cursor = list(win32api.GetCursorPos())
+        except Exception:
+            cursor = None
+        payload = {
+            "foreground": hex(win32gui.GetForegroundWindow()),
+            "cursor": cursor,
+            "windows": rows,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _login_failure_facts(pid: int) -> str:
