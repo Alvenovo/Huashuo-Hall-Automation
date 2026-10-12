@@ -55,6 +55,23 @@ def theme_selected(pid: int) -> str | None:
     return None
 
 
+def theme_state(pid: int) -> dict[str, object]:
+    """主题区的「现状快照」，给用例驱动模板 `radio_group_exactly_one` 用（2026-10-12）。
+
+    返回统一形状（见 `hall_auto/drivers.py` 的约定）：
+
+        {"controls": {档位名: 在不在}, "selected": 当前选中的档位名 or None}
+
+    `theme_nodes()` 只返回**存在**的节点，这里补成「三档各自在不在」，
+    这样「集合是否等于 `THEME_AIDS`」这条断言就能由数据（YAML 的 group）来表达。
+    """
+    nodes = theme_nodes(pid)
+    return {
+        "controls": {label: label in nodes for label in THEME_AIDS},
+        "selected": theme_selected(pid),
+    }
+
+
 def _select_radio(node) -> bool:
     """先走 SelectionItem 模式（不依赖坐标）；点偏了会改到隔壁档位，所以坐标点击只当兜底。"""
     try:

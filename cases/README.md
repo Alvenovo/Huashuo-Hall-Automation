@@ -88,7 +88,22 @@ def test_register_controls_present(register_pid, case):
 **改期望控件、加一条同页控件图用例 = 只改 YAML。**
 模板还支持 `expect_absent`（不该出现的控件）与 `expect_exact`（集合必须相等）。
 
-看有哪些现成模板：`python -X utf8 tools\run_cases.py --list-drivers`
+**已有的模板**（`python -X utf8 tools\run_cases.py --list-drivers` 随时可查）：
+
+| 模板 | 断言什么 | 用例给什么 |
+| --- | --- | --- |
+| `controls_present` | 页面上列出的控件都在 | `page` + `expect`（+ `expect_absent` / `expect_exact`） |
+| `radio_group_exactly_one` | 一组档位都在、**恰有一个**选中 | `page` + `group`（+ `expect_exact`） |
+
+`radio_group_exactly_one` 的例子就是主题三档：
+
+```yaml
+- id: P1D-01
+  driver: radio_group_exactly_one
+  page: settings_theme
+  group: [浅色, 深色, 跟随系统]
+  expect_exact: true
+```
 
 ⚠️ **边界**：「打开哪个页面、点什么按钮、控件怎么定位」永远要代码（`PAGES` 加一行 +
 一个薄测试函数）。这条边界见《用例数据化方案.md》「三补」一节，不打算绕。

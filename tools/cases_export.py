@@ -117,6 +117,8 @@ def validate(doc: dict) -> list[str]:
                 )
             elif c["driver"] == "controls_present" and not c.get("page"):
                 problems.append(f"{tag}: controls_present 需要 page 字段")
+            elif c["driver"] == "radio_group_exactly_one" and not c.get("group"):
+                problems.append(f"{tag}: radio_group_exactly_one 需要非空 group 字段")
             elif c["driver"] == "controls_present" and c.get("page") not in _drv.PAGES:
                 problems.append(
                     f"{tag}: page={c.get('page')!r} 没在 hall_auto/drivers.py 的 PAGES 里"

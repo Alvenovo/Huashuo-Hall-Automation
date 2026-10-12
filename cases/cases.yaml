@@ -322,12 +322,20 @@ cases:
   suite: settings
   marker:
   - settings
-  tier: code
+  tier: data
   kind: case
   status: active
   verify: 浅色 / 深色 / 跟随系统三档齐全，且当前有且仅有一档处于选中态
   ref: tests/launch/test_p1_theme.py::test_theme_controls_present
   needs: 本机已装大厅；会改外观档位，收尾自动还原
+  driver: radio_group_exactly_one
+  page: settings_theme
+  group:
+  - 浅色
+  - 深色
+  - 跟随系统
+  expect_exact: true
+  notes: 期望档位已外置（2026-10-12）；改档位名/加减档位只改本文件，不碰 Python
 - id: P1D-02
   title: 主题切换持久化
   suite: settings

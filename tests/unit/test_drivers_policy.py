@@ -84,6 +84,79 @@ def test_unknown_page_is_an_error():
     assert "未知页面" in str(exc.value)
 
 
+# ---------------------------------------------------------------------------
+# radio_group_exactly_one（主题三档那类：一组档位，恰有一个选中）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fake_radio(monkeypatch):
+    """注册一个假页面 `fakeradio`，返回统一形状 `{controls, selected}`。"""
+
+    def _install(controls: dict, selected):
+        monkeypatch.setitem(drivers.PAGES, "fakeradio", ("假单选组", "unused:unused"))
+        monkeypatch.setitem(drivers._PAGE_CACHE, "fakeradio",
+                            lambda handle: {"controls": controls, "selected": selected})
+
+    return _install
+
+
+def test_radio_group_passes_when_exactly_one_selected(fake_radio):
+    fake_radio({"浅色": True, "深色": True, "跟随系统": True}, "深色")
+    drivers.radio_group_exactly_one(
+        "fakeradio", 1,
+        {"id": "X", "group": ["浅色", "深色", "跟随系统"], "expect_exact": True})
+
+
+def test_radio_group_rejects_missing_option(fake_radio):
+    fake_radio({"浅色": True, "深色": False, "跟随系统": True}, "浅色")
+    with pytest.raises(AssertionError) as exc:
+        drivers.radio_group_exactly_one(
+            "fakeradio", 1, {"id": "X", "group": ["浅色", "深色", "跟随系统"]})
+    assert "深色" in str(exc.value)
+
+
+def test_radio_group_rejects_nothing_selected(fake_radio):
+    """一个都没选中必须红 —— 这正是原用例里 `theme_selected(pid) in THEME_AIDS` 那条。"""
+    fake_radio({"浅色": True, "深色": True, "跟随系统": True}, None)
+    with pytest.raises(AssertionError) as exc:
+        drivers.radio_group_exactly_one(
+            "fakeradio", 1, {"id": "X", "group": ["浅色", "深色", "跟随系统"]})
+    assert "当前选中的是 None" in str(exc.value)
+
+
+def test_radio_group_rejects_selection_outside_the_group(fake_radio):
+    """选中的档位不在要求的那组里也要红（防止「组写少了、实际选到组外」）。"""
+    fake_radio({"浅色": True, "深色": True}, "跟随系统")
+    with pytest.raises(AssertionError) as exc:
+        drivers.radio_group_exactly_one(
+            "fakeradio", 1, {"id": "X", "group": ["浅色", "深色"]})
+    assert "跟随系统" in str(exc.value)
+
+
+def test_radio_group_exact_rejects_extra_option(fake_radio):
+    fake_radio({"浅色": True, "深色": True, "跟随系统": True}, "浅色")
+    with pytest.raises(AssertionError) as exc:
+        drivers.radio_group_exactly_one(
+            "fakeradio", 1, {"id": "X", "group": ["浅色", "深色"], "expect_exact": True})
+    assert "跟随系统" in str(exc.value)
+
+
+def test_radio_group_without_group_is_an_error(fake_radio):
+    """没给 group = 什么都没断言 —— 必须报错。"""
+    fake_radio({"浅色": True}, "浅色")
+    with pytest.raises(AssertionError):
+        drivers.radio_group_exactly_one("fakeradio", 1, {"id": "X"})
+
+
+def test_old_style_page_helpers_still_work(fake_page):
+    """老助手直接返回 `{名字: bool}`（如 `register_controls`）—— `_split` 要能兼容，
+    **不用为了适配驱动去改那些生产模块**。"""
+    fake_page({"a": True, "b": False})
+    drivers.controls_present("fakepage", 1, {"id": "X", "expect": ["a"]})
+    with pytest.raises(AssertionError):
+        drivers.controls_present("fakepage", 1, {"id": "X", "expect": ["b"]})
+
+
 def test_unknown_driver_is_an_error():
     with pytest.raises(AssertionError) as exc:
         drivers.run("不存在的模板", "register", 1, {"id": "X"})

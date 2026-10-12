@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import pytest
 
+from hall_auto import drivers
 from hall_auto.launch import start_fresh, wait_main_window, wait_until_ready
 from hall_auto.product import stop_main_process
 from hall_auto.settings import (
     DARK_LUMINANCE_MAX,
-    THEME_AIDS,
     ensure_settings,
     main_luminance,
     open_settings,
     set_theme,
-    theme_nodes,
     theme_selected,
 )
 
@@ -49,11 +48,13 @@ def session(cfg, installed):
 
 
 @pytest.mark.settings
-def test_theme_controls_present(session):
-    """P1-D 主题控件图：浅色/深色/跟随系统三档齐全，且当前有且仅有一档选中"""
-    nodes = theme_nodes(session.pid)
-    assert set(nodes) == set(THEME_AIDS), f"主题三档没找齐：{sorted(nodes)}"
-    assert theme_selected(session.pid) in THEME_AIDS
+def test_theme_controls_present(session, case):
+    """P1-D 主题控件图：浅色/深色/跟随系统三档齐全，且当前有且仅有一档选中
+
+    **期望档位在 `cases/cases.yaml`（编号 P1D-01）** —— 改档位名 / 加减档位只改 YAML，
+    由 `hall_auto/drivers.py::radio_group_exactly_one` 模板执行。
+    """
+    drivers.run(case["driver"], case["page"], session.pid, case)
 
 
 @pytest.mark.settings

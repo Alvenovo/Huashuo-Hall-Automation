@@ -38,6 +38,7 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 PAGES: dict[str, tuple[str, str]] = {
     "register": ("注册页", "hall_auto.register:register_controls"),
+    "settings_theme": ("设置页·主题三档", "hall_auto.settings:theme_state"),
 }
 
 _PAGE_CACHE: dict[str, Callable[[int], dict[str, Any]]] = {}
@@ -53,9 +54,20 @@ def page_getter(page: str) -> Callable[[int], dict[str, Any]]:
     return _PAGE_CACHE[page]
 
 
-def _present(raw: dict[str, Any]) -> dict[str, bool]:
-    """把各页面助手的返回值统一成 `{名字: 在不在}`。"""
-    return {k: bool(v) for k, v in raw.items()}
+# ---------------------------------------------------------------------------
+# 页面助手返回值的**统一形状**（各模板按需取键）
+#
+#   {"controls": {名字: 在不在}, "selected": 名字 or None}
+#
+# 老助手（如 `register_controls`）直接返回 `{名字: bool}`，`_split()` 会兼容，
+# **不用为了适配驱动去改它们**。
+# ---------------------------------------------------------------------------
+
+def _split(raw: dict[str, Any]) -> tuple[dict[str, bool], Any]:
+    if "controls" in raw or "selected" in raw:
+        controls = {k: bool(v) for k, v in (raw.get("controls") or {}).items()}
+        return controls, raw.get("selected")
+    return {k: bool(v) for k, v in raw.items()}, None
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +82,7 @@ def controls_present(page: str, handle: int, case: dict) -> None:
     `case["expect_exact"]` —— 可选，`true` 时要求「存在的控件集合 == expect」（多一个都算失败）
     """
     label, _ = PAGES.get(page, (page, ""))
-    present = _present(page_getter(page)(handle))
+    present, _selected = _split(page_getter(page)(handle))
 
     expect = list(case.get("expect") or [])
     absent = list(case.get("expect_absent") or [])
@@ -94,9 +106,44 @@ def controls_present(page: str, handle: int, case: dict) -> None:
         assert not extra, f"{label}存在预期外的控件：{extra}（expect_exact=true 要求集合相等）"
 
 
+def radio_group_exactly_one(page: str, handle: int, case: dict) -> None:
+    """断言「一组单选控件（单选钮/档位）都在，且**恰有一个**处于选中态」。
+
+    主题三档就是这一类。用例给：
+
+    `case["group"]`       —— 这组控件的名字（`PAGES` 里那个助手认识的键）
+    `case["expect_exact"]` —— 可选，`true` 时要求「存在的控件集合 == group」
+
+    页面助手要返回统一形状（见 `_split`）：`{"controls": {...}, "selected": 名字 or None}`。
+    """
+    label, _ = PAGES.get(page, (page, ""))
+    present, selected = _split(page_getter(page)(handle))
+
+    group = list(case.get("group") or [])
+    if not group:
+        raise AssertionError(f"{case.get('id')}: radio_group_exactly_one 必须给 group")
+
+    missing = [k for k in group if not present.get(k)]
+    assert not missing, (
+        f"{label}缺档位/选项：{missing}（要求的：{group}；实际存在的："
+        f"{sorted(k for k, ok in present.items() if ok)}）"
+    )
+
+    if case.get("expect_exact"):
+        extra = sorted(k for k, ok in present.items() if ok and k not in group)
+        assert not extra, f"{label}存在预期外的档位：{extra}（expect_exact=true 要求集合相等）"
+
+    assert selected in group, (
+        f"{label}当前选中的是 {selected!r}，不在要求的那组 {group} 里"
+        "（既不能一个没选，也不能选到组外）"
+    )
+
+
 DRIVERS: dict[str, tuple[str, Callable[[str, int, dict], None]]] = {
     "controls_present": ("断言页面上列出的控件都在（expect / expect_absent / expect_exact）",
                          controls_present),
+    "radio_group_exactly_one": ("断言一组档位都在、且恰有一个选中（group / expect_exact）",
+                                radio_group_exactly_one),
 }
 
 
