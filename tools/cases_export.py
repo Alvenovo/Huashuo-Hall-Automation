@@ -105,8 +105,23 @@ def validate(doc: dict) -> list[str]:
                 problems.append(
                     f"{tag}: ref 文件 {rel} 不在 suite={suite} 的 paths {allowed} 里"
                 )
-        if c.get("tier") == "data" and not c.get("params"):
-            problems.append(f"{tag}: tier=data 必须有非空 params（参数表外置在 YAML 里）")
+        if c.get("tier") == "data" and not c.get("params") and not c.get("driver"):
+            problems.append(f"{tag}: tier=data 必须有非空 params 或 driver")
+        if c.get("driver"):
+            from hall_auto import drivers as _drv
+
+            if c["driver"] not in _drv.DRIVERS:
+                problems.append(
+                    f"{tag}: driver={c['driver']!r} 没在 hall_auto/drivers.py 注册"
+                    f"（可用：{sorted(_drv.DRIVERS)}）"
+                )
+            elif c["driver"] == "controls_present" and not c.get("page"):
+                problems.append(f"{tag}: controls_present 需要 page 字段")
+            elif c["driver"] == "controls_present" and c.get("page") not in _drv.PAGES:
+                problems.append(
+                    f"{tag}: page={c.get('page')!r} 没在 hall_auto/drivers.py 的 PAGES 里"
+                    f"（可用：{sorted(_drv.PAGES)}）"
+                )
     return problems
 
 

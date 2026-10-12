@@ -61,6 +61,38 @@ $env:HALL_CASES_FILE = "D:\跑批\用例\文件A.yaml"
 
 ⚠️ 本脚本**不做并发**。20 台同时跑、提权通道、并发预算那套归 `tools/run_farm.py`。
 
+## 驱动模板：加「同类型」用例也不用改 Python
+
+有些用例只是「**断言什么**」不同，流程一模一样 —— 这类抽成了**驱动模板**。
+用例在文件里选一个模板 + 给参数即可：
+
+```yaml
+- id: P1C-01
+  title: 注册页控件图
+  suite: login
+  tier: data
+  driver: controls_present      # 模板名
+  page: register                # 哪个页面
+  expect: [phone, code, send_code, password, confirm, agree, submit]
+  ref: tests/launch/test_p1_register.py::test_register_controls_present
+```
+
+测试函数缩成一行：
+
+```python
+@pytest.mark.login
+def test_register_controls_present(register_pid, case):
+    drivers.run(case["driver"], case["page"], register_pid, case)
+```
+
+**改期望控件、加一条同页控件图用例 = 只改 YAML。**
+模板还支持 `expect_absent`（不该出现的控件）与 `expect_exact`（集合必须相等）。
+
+看有哪些现成模板：`python -X utf8 tools\run_cases.py --list-drivers`
+
+⚠️ **边界**：「打开哪个页面、点什么按钮、控件怎么定位」永远要代码（`PAGES` 加一行 +
+一个薄测试函数）。这条边界见《用例数据化方案.md》「三补」一节，不打算绕。
+
 ## 三种操作
 
 ### 加一条用例

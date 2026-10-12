@@ -147,10 +147,23 @@ def main() -> int:
     ap.add_argument("--status", default="", help="只跑这些状态，逗号分隔，如 active,xfail")
     ap.add_argument("--exclude-status", default="", help="额外排除的状态，逗号分隔")
     ap.add_argument("--list", action="store_true", help="只列出会跑什么，不执行")
+    ap.add_argument("--list-drivers", action="store_true",
+                    help="列出可用的驱动模板与页面（看看有哪些现成模板，不用改 Python）")
     ap.add_argument("--allow-manual", action="store_true", help="允许跑人在环（会真发短信，需交互式终端）")
     ap.add_argument("--allow-destructive", action="store_true", help="允许跑真装真卸（install / apps-lifecycle）")
     ap.add_argument("--extra", default="", help="透传给 pytest 的额外参数，如 \"-k mismatch\"")
     args = ap.parse_args()
+
+    if args.list_drivers:
+        from hall_auto import drivers
+
+        print("[驱动模板] 用例在用例文件里选一个 + 给参数，不用改 Python：")
+        for name, desc in drivers.describe():
+            print(f"  {name:18} {desc}")
+        print("[页面] 已注册、可查控件现状的页面：")
+        for name, label in drivers.describe_pages():
+            print(f"  {name:18} {label}")
+        return 0
 
     cases_path = cases_db.resolve_path(args.cases or None)
     print(f"[用例文件] {cases_path}")

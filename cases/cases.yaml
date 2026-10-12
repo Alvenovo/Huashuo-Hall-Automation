@@ -211,12 +211,23 @@ cases:
   suite: login
   marker:
   - login
-  tier: code
+  tier: data
   kind: case
   status: active
   verify: 手机号、验证码、发送、密码、确认密码、协议、注册按钮齐全
   ref: tests/launch/test_p1_register.py::test_register_controls_present
   needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+  driver: controls_present
+  page: register
+  expect:
+  - phone
+  - code
+  - send_code
+  - password
+  - confirm
+  - agree
+  - submit
+  notes: 期望控件列表已外置（2026-10-12）；改用期望值、或加一条同页控件图用例，只改本文件，不碰 Python
 - id: P1C-02
   title: 注册按钮门禁
   suite: login

@@ -67,21 +67,24 @@ def installed():
 def pytest_generate_tests(metafunc):
     """**只在测试函数声明了 `case` 形参时才动手** —— 对其它用例零副作用。
 
-    加一组参数 = 改 `cases/cases.yaml`，不碰 Python。
-    参数表缺失/为空时**直接报错**，不静默跳过（静默跳过等于悄悄少跑用例）。
+    两种注入形态（见 `hall_auto/cases.py::injection_for`）：
+
+    - `params:` 列表 → `case` 是**其中一组参数**，pytest id = 那组的 `name`。
+    - `driver:` 模板 → `case` 是**整条用例**，pytest id = 用例编号。
+
+    加一组参数 / 改期望值 = 改 `cases/cases.yaml`，不碰 Python。
+    用例文件里查不到对应条目时**直接报错**，不静默跳过（静默跳过等于悄悄少跑用例）。
     """
     if "case" not in metafunc.fixturenames:
         return
 
     from hall_auto import cases as cases_db
 
-    params = cases_db.params_for(metafunc.function.__name__)
-    if params is None:
+    injected = cases_db.injection_for(metafunc.function.__name__)
+    if injected is None:
         raise pytest.UsageError(
             f"{metafunc.function.__name__} 声明了 `case` 形参，"
-            f"但 cases/cases.yaml 里没有它的 `tier: data` 条目（或 params 为空）"
+            f"但用例文件里没有它的 `tier: data` 条目（或既无 params 也无 driver）"
         )
-    metafunc.parametrize(
-        "case", params,
-        ids=[p.get("name") or f"p{i}" for i, p in enumerate(params)],
-    )
+    items, ids = injected
+    metafunc.parametrize("case", items, ids=ids)

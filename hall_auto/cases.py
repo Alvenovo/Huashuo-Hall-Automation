@@ -82,3 +82,32 @@ def params_for(func_name: str, path: str | os.PathLike[str] | None = None) -> li
     if not isinstance(params, list) or not params:
         raise ValueError(f"{case['id']} 是 tier=data 但没有非空 params")
     return params
+
+
+def injection_for(
+    func_name: str, path: str | os.PathLike[str] | None = None
+) -> tuple[list[dict[str, Any]], list[str]] | None:
+    """`tier: data` 用例怎么注入给测试函数。返回 `(注入项, 用例 id)`；`None` = 不注入。
+
+    两种形态（`case` 形参拿到的东西**不一样**，别混）：
+
+    - **参数表**（`params:` 列表）→ `case` 是**其中一组参数**（dict），
+      pytest id 取每组参数自己的 `name`。用例函数里写 `case["password"]`。
+    - **驱动模板**（`driver:` 模板名，参数写在用例顶层）→ `case` 是**整条用例**（dict），
+      pytest id 取用例编号。用例函数里写 `case["expect"]` 之类，再交给 `drivers.run`。
+
+    两种都要求 `tier: data`；`driver` 与 `params` 可以同时有（模板 + 多组参数），
+    这时按**参数表**注入，每组参数里带上模板需要的字段。
+    """
+    case = by_func(path).get(func_name)
+    if case is None or case.get("tier") != "data":
+        return None
+    params = case.get("params")
+    if isinstance(params, list) and params:
+        ids = [str(p.get("name") or f"p{i}") for i, p in enumerate(params)]
+        return params, ids
+    if case.get("driver"):
+        return [case], [str(case.get("id") or func_name)]
+    raise ValueError(
+        f"{case['id']} 是 tier=data，但既没有非空 params 也没有 driver —— 没有东西可注入"
+    )

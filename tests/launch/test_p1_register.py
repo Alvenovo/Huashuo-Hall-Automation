@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from hall_auto import drivers
 from hall_auto.launch import popup_text, start_fresh, wait_main_window, wait_until_ready
 from hall_auto.login import _nodes, logout
 from hall_auto.product import stop_main_process
@@ -11,7 +12,6 @@ from hall_auto.register import (
     click_register,
     fill_register,
     open_register_page,
-    register_controls,
     register_enabled,
     register_open,
     set_agree,
@@ -37,11 +37,13 @@ def register_pid(cfg, installed):
 
 
 @pytest.mark.login
-def test_register_controls_present(register_pid):
-    """P1-C 注册页控件图：手机号/验证码/发送/密码/确认密码/协议/注册齐全"""
-    controls = register_controls(register_pid)
-    missing = [key for key, ok in controls.items() if not ok]
-    assert not missing, f"注册页缺控件: {missing}（全部: {controls}）"
+def test_register_controls_present(register_pid, case):
+    """P1-C 注册页控件图：手机号/验证码/发送/密码/确认密码/协议/注册齐全
+
+    **期望控件列表在 `cases/cases.yaml`（编号 P1C-01）** —— 改期望值只改 YAML，
+    由 `hall_auto/drivers.py::controls_present` 模板执行。加一条同类控件图用例同理。
+    """
+    drivers.run(case["driver"], case["page"], register_pid, case)
 
 
 @pytest.mark.login
