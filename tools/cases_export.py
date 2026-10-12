@@ -105,8 +105,8 @@ def validate(doc: dict) -> list[str]:
                 problems.append(
                     f"{tag}: ref 文件 {rel} 不在 suite={suite} 的 paths {allowed} 里"
                 )
-        if c.get("tier") == "data" and not c.get("driver"):
-            problems.append(f"{tag}: tier=data 必须给 driver")
+        if c.get("tier") == "data" and not c.get("params"):
+            problems.append(f"{tag}: tier=data 必须有非空 params（参数表外置在 YAML 里）")
     return problems
 
 

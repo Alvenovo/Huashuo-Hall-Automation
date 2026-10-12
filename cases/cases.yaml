@@ -233,12 +233,56 @@ cases:
   suite: login
   marker:
   - login
-  tier: code
+  tier: data
   kind: case
   status: active
   verify: 过短 / 纯数字 / 含中文 / 过长 / 为空 / 两次不一致 —— 每种都禁用按钮且对应提示变红
   ref: tests/launch/test_p1_register.py::test_register_invalid_password_blocks_submit
   needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+  params:
+  - name: short-3
+    password: ab1
+    confirm: ab1
+    expect_tips:
+    - true
+    - true
+  - name: digits-only
+    password: '12345678'
+    confirm: '12345678'
+    expect_tips:
+    - true
+    - true
+  - name: chinese
+    password: abc中文123
+    confirm: abc中文123
+    expect_tips:
+    - true
+    - true
+  - name: long-40
+    password: A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1
+    confirm: A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1
+    expect_tips:
+    - true
+    - true
+  - name: empty-both
+    password: ''
+    confirm: ''
+    expect_tips:
+    - true
+    - true
+  - name: mismatch
+    password: <合法密码>
+    confirm: Abcdef124
+    expect_tips:
+    - false
+    - true
+  - name: empty-confirm
+    password: <合法密码>
+    confirm: ''
+    expect_tips:
+    - false
+    - true
+  notes: 参数表已外置到本文件（2026-10-12 第 3 步试水）；改参数只改这里，不碰 Python
 - id: P1C-04
   title: 合法密码放行
   suite: login
@@ -429,7 +473,6 @@ cases:
   ref: tests/launch/test_p0_probe.py::test_probe_mine_lists_and_net
   needs: 本机已装大厅；只读探针，不点按钮不装不卸不登录
   notes: 不是业务用例，是排障探针；导出时默认不列
-
 - id: P2X-01
   title: 会员入口与权益页抽检
   suite: ''

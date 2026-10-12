@@ -86,7 +86,8 @@ cases/清单.md       ← 导出物（别手改），人看的表格版
 | `title` | ✅ | 用例名 |
 | `suite` | ✅ | 套件名，必须是 `hall_auto/suites.py` 里的键（`todo` 可空） |
 | `marker` | ✅ | pytest 标记（选套件用）。**不能写 `xfail`/`skipif` 这类 pytest 内置标记**（`todo` 可空） |
-| `tier` | ✅ | `code` = 逻辑在代码里（现在全是）；`data` = 参数化数据驱动（第 3 步才启用） |
+| `tier` | ✅ | `code` = 逻辑在代码里；`data` = **参数表在本文件里**，由 conftest 注入 |
+| `params` | | `tier: data` 时必填。每组一个 dict，`name` 会变成 pytest 的用例 id |
 | `kind` | ✅ | `case` = 业务用例；`probe` = 只读探针（导出时默认不列） |
 | `status` | ✅ | `active` / `manual`（人在环）/ `xfail`（疑似缺陷）/ `destructive`（真装真卸）/ `todo`（还没自动化） |
 | `verify` | ✅ | 「具体验证什么」—— 导出物直接用它 |
@@ -95,6 +96,35 @@ cases/清单.md       ← 导出物（别手改），人看的表格版
 | `notes` | | 备注（已知问题、待办） |
 
 ---
+
+## 参数表外置（`tier: data`）—— 加一组参数不用碰 Python
+
+`cases/cases.yaml` 里 `tier: data` 的条目，参数表就写在它下面：
+
+```yaml
+- id: P1C-03
+  tier: data
+  ref: tests/launch/test_p1_register.py::test_register_invalid_password_blocks_submit
+  params:
+  - {name: short-3,     password: "ab1",      confirm: "ab1",      expect_tips: [true, true]}
+  - {name: digits-only, password: "12345678", confirm: "12345678", expect_tips: [true, true]}
+```
+
+测试函数**照常写**，只多一个 `case` 形参：
+
+```python
+@pytest.mark.login
+def test_register_invalid_password_blocks_submit(register_pid, case):
+    password, confirm = case["password"], case["confirm"]
+    ...
+```
+
+`tests/launch/conftest.py::pytest_generate_tests` 见到 `case` 形参就去 YAML 取参数表注入。
+
+**加一组参数 = 在 YAML 里加一行，不碰 Python。**
+已实测：往 `P1C-03` 插第 8 组 → 收集数 43→44；删掉 → 回到 43。
+
+⚠️ 声明了 `case` 但 YAML 里没有对应条目 → **直接报错**，不会静默少跑。
 
 ## 守卫会拦你什么
 

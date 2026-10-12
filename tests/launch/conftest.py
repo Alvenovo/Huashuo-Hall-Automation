@@ -57,3 +57,31 @@ def installed():
     if info is None or not info.exe_path.is_file():
         pytest.skip(INSTALLED_SKIP_REASON)
     return info
+
+
+# ---------------------------------------------------------------------------
+# 用例清单数据化：把 `tier: data` 用例的参数表从 `cases/cases.yaml` 注入进来
+# （2026-10-12，见根目录《用例数据化方案.md》）
+# ---------------------------------------------------------------------------
+
+def pytest_generate_tests(metafunc):
+    """**只在测试函数声明了 `case` 形参时才动手** —— 对其它用例零副作用。
+
+    加一组参数 = 改 `cases/cases.yaml`，不碰 Python。
+    参数表缺失/为空时**直接报错**，不静默跳过（静默跳过等于悄悄少跑用例）。
+    """
+    if "case" not in metafunc.fixturenames:
+        return
+
+    from hall_auto import cases as cases_db
+
+    params = cases_db.params_for(metafunc.function.__name__)
+    if params is None:
+        raise pytest.UsageError(
+            f"{metafunc.function.__name__} 声明了 `case` 形参，"
+            f"但 cases/cases.yaml 里没有它的 `tier: data` 条目（或 params 为空）"
+        )
+    metafunc.parametrize(
+        "case", params,
+        ids=[p.get("name") or f"p{i}" for i, p in enumerate(params)],
+    )

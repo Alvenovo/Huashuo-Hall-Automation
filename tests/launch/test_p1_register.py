@@ -24,17 +24,6 @@ FAKE_CODE = "000000"
 VALID_PASSWORD = "Abcdef123"
 
 # (密码, 确认密码, 期望红提示)：第一行是密码格式提示，第二行是确认密码提示
-INVALID_CASES = [
-    pytest.param("ab1", "ab1", (True, True), id="short-3"),
-    pytest.param("12345678", "12345678", (True, True), id="digits-only"),
-    pytest.param("abc中文123", "abc中文123", (True, True), id="chinese"),
-    pytest.param("A1" * 20, "A1" * 20, (True, True), id="long-40"),
-    pytest.param("", "", (True, True), id="empty-both"),
-    pytest.param(VALID_PASSWORD, "Abcdef124", (False, True), id="mismatch"),
-    pytest.param(VALID_PASSWORD, "", (False, True), id="empty-confirm"),
-]
-
-
 @pytest.fixture(scope="module")
 def register_pid(cfg, installed):
     app = start_fresh(cfg)
@@ -69,9 +58,14 @@ def test_register_submit_gate(register_pid):
 
 
 @pytest.mark.login
-@pytest.mark.parametrize(("password", "confirm", "expected_tips"), INVALID_CASES)
-def test_register_invalid_password_blocks_submit(register_pid, password, confirm, expected_tips):
-    """P1-C 非法密码拦截：过短/纯数字/中文/过长/为空/两次不一致都禁用按钮且对应提示变红"""
+def test_register_invalid_password_blocks_submit(register_pid, case):
+    """P1-C 非法密码拦截：过短/纯数字/中文/过长/为空/两次不一致都禁用按钮且对应提示变红
+
+    参数表在 `cases/cases.yaml`（编号 P1-C-03）—— **加一组参数只改 YAML**，
+    由 `tests/launch/conftest.py::pytest_generate_tests` 注入。
+    """
+    password, confirm = case["password"], case["confirm"]
+    expected_tips = tuple(case["expect_tips"])
     fill_register(register_pid, FAKE_PHONE, FAKE_CODE, password, confirm)
     set_agree(register_pid, True)
     assert not register_enabled(register_pid), f"非法密码 {password!r}/{confirm!r} 应禁用注册按钮"
