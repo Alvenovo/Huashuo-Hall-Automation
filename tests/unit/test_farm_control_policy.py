@@ -1,6 +1,6 @@
-"""锁控制机侧策略（tools/farm_control.py）：人在环门禁 + 汇总报告的凭据列。
+"""锁控制机侧策略（tools/farm_control.py）：人在环门禁 + 汇总报告 + 节点索引。
 
-两件事都直接决定测试人员能不能按手册得出结论：
+三件事都直接决定测试人员能不能按手册得出结论：
 
 1. **人在环套件不能进农场**。手册明确承诺 `login-manual`「永不进农场」，但早先
    `dispatch` 只打印一句 `⚠ 人在环，不应进农场`，照样把任务写出去 ——
@@ -12,6 +12,12 @@
    只读 `results/*/summary.json`，而凭据状态只写在 `done/` 回执里，
    `nodes_data` 从未写入 `credentials` 键 → 那一列**恒为 ✗**，
    一线会拿着全红的凭据列去反复折腾 `farm_node.env`。
+
+3. **「目录名 ↔ 套件」必须对得上**。run 目录名只有「节点_日期_时刻」，
+   一个节点跑过 133 轮之后，`..._1349` 和 `..._1353` 谁是谁在资源管理器里根本分不清，
+   也就没法「拿报告去对应校验」（2026-10-12 用户实报）。套件名一直躺在每轮的
+   `node_env.json` 里，只是没人把它摊到目录这一层 —— `results/<节点>/index.html` 就是补这个。
+   同时根目录那份 `aggregate_report.html` 固定名会被下一轮覆盖，所以另存带时间戳的归档。
 """
 
 from __future__ import annotations
@@ -313,3 +319,160 @@ def test_aggregate_shows_errors_as_their_own_column(farm, capsys):
 
     out = capsys.readouterr().out
     assert "错误" in out and "setup" in out, "控制台要明确提示有 error，别让人只看个总数"
+
+
+# ---------------- 节点索引：目录名 ↔ 套件 ----------------
+
+# 2026-10-12 用户实报：一个节点跑了 133 轮，`results/<节点>/` 下全是
+# `LAPTOP-x_2026-09-29_1349` / `..._1353` 这种**只带节点和时间**的目录名，
+# 资源管理器里分不清哪个是哪个，也就没法「拿报告去对应校验」。
+# 套件名本来就在每轮的 `node_env.json` 里（`farm_agent.py` 写的），
+# 索引页的职责就是把它摊到目录这一层 —— 目录名不能改（节点侧已铺开，改名要全网 pull）。
+
+
+def _put_suite_run(farm: Path, node: str, run: str, suite: str | None) -> Path:
+    """`suite=None` 模拟老版本节点（压根不写 `node_env.json`）。"""
+    env = None if suite is None else {
+        "node": node, "task_id": "T1", "suite": suite, "credentials": {},
+    }
+    return _put_run(farm, node, run, node_env=env)
+
+
+def _line_of(html: str, needle: str, *, require: str = "") -> str:
+    """取含 `needle` 的那一行 —— 索引页每条 `<tr>` 都在自己一行上。
+
+    `require` 用来消歧：同一个轮次名在页面里出现不止一次（索引页的「按套件看」表、
+    汇总报告矩阵格的 `title="来源轮次: …"`），不加限定会取到错的那一行。
+    """
+    return next((ln for ln in html.splitlines() if needle in ln and require in ln), "")
+
+
+def test_node_index_maps_each_run_dir_to_its_suite(farm):
+    """**核心回归锁**：索引页要把「目录名 ↔ 套件」对到同一行上。
+
+    只把套件名列出来还不够 —— 用户要的是「这个文件夹是哪套件」，
+    所以目录名和套件必须落在同一行里，按套件筛一下就能只留他关心的那几轮。
+    """
+    _put_suite_run(farm, "R01", "R01_2026-09-29_1349", "launch")
+    _put_suite_run(farm, "R01", "R01_2026-09-29_1352", "unit")
+
+    assert farm_control.cmd_index(argparse.Namespace()) == 0
+    html = (farm / "results" / "R01" / "index.html").read_text(encoding="utf-8")
+
+    for run, suite in (("R01_2026-09-29_1349", "launch"), ("R01_2026-09-29_1352", "unit")):
+        line = _line_of(html, run, require="data-suite=")
+        assert line, f"{run} 该在索引表里有一行"
+        assert f'data-suite="{suite}"' in line, f"{run} 那一行要标出套件 {suite}，否则还是对不上"
+        assert f"./{run}/report.html" in line, f"{run} 要能点进它自己的报告"
+
+    assert 'data-suite="?"' not in html, "node_env.json 里明明有 suite，不该退化成 ?"
+
+
+def test_node_index_falls_back_to_module_names_without_node_env(farm):
+    """老版本节点没写 `node_env.json` → 退化成 summary 里的 module 名，不能整列 `?`。
+
+    回退不是可选项：`results/` 里存着 09 月的老结果，那些轮次永远不会有 node_env.json，
+    没有回退的话一半的目录名照样对不上套件。
+    """
+    _put_suite_run(farm, "R01", "R01_2026-09-29_1349", None)
+
+    assert farm_control.cmd_index(argparse.Namespace()) == 0
+    html = (farm / "results" / "R01" / "index.html").read_text(encoding="utf-8")
+
+    assert 'data-suite="launch"' in html, "没有 node_env.json 时该从 summary 的 module 名推断"
+    assert 'data-suite="?"' not in html
+
+
+def test_node_index_links_every_run_to_its_own_report(farm):
+    """反向：索引页不许漏轮次 —— 漏掉的那一轮就又回到「分不清」了。"""
+    runs = [f"R01_2026-09-29_13{h:02d}" for h in (49, 52, 53, 56, 58)]
+    for run in runs:
+        _put_suite_run(farm, "R01", run, "launch")
+
+    assert farm_control.cmd_index(argparse.Namespace()) == 0
+    html = (farm / "results" / "R01" / "index.html").read_text(encoding="utf-8")
+
+    for run in runs:
+        assert f"./{run}/report.html" in html, f"{run} 漏了"
+
+
+# ---------------- 汇总报告的归档副本 ----------------
+
+# 根目录那份 `aggregate_report.html` 是**固定文件名，每跑一次覆盖一次**。
+# 10-09 那轮的汇总报告就是这么没的 —— 想跟 10-10 的结果做跨批次对比时，无据可查。
+# 所以每跑一次要另存一份带时间戳的；根目录那份保留，因为手册/清单承诺的是那个路径。
+
+
+def test_aggregate_archives_a_timestamped_copy(farm):
+    """归档副本要与根目录那份**内容一致**，别生成个空壳。"""
+    _put_run(farm, "R01", "R01_2026-09-21_1000")
+
+    _render(farm)
+
+    archived = list((farm / "汇总").glob("aggregate_*.html"))
+    assert len(archived) == 1, f"该有一份归档，实际 {len(archived)} 份"
+    assert archived[0].read_text(encoding="utf-8") == \
+        (farm / "aggregate_report.html").read_text(encoding="utf-8"), "归档副本内容该和根目录那份一样"
+
+
+class _FrozenClock:
+    """把 `farm_control.datetime` 换成一个 `now()` 固定的替身（`fromisoformat` 透传）。
+
+    ## 为什么非要有它（2026-10-12）
+
+    `test_second_aggregate_does_not_overwrite_the_first_archive` 要测的是
+    「**同一秒**连跑两次会不会互相覆盖」。靠真实时钟的话，两次调用有一半概率落在**不同秒** ——
+    那时压根没走到撞名分支，**用例测的是另一条路**，红了绿了都不代表真实行为。
+    实测过：单跑 30 次全过、文件级连跑 5 轮全过，但全量套件里偶发红一次 —— 就是这个道理。
+
+    把时钟钉死，这条用例才变成确定性的。
+    """
+
+    def __init__(self, frozen: datetime):
+        self._frozen = frozen
+
+    def now(self, tz=None) -> datetime:            # noqa: ARG002 —— 签名对齐真类
+        return self._frozen
+
+    @staticmethod
+    def fromisoformat(s: str) -> datetime:
+        return datetime.fromisoformat(s)
+
+
+def test_second_aggregate_does_not_overwrite_the_first_archive(farm, monkeypatch):
+    """连跑两次要留**两份**归档。
+
+    同一秒连跑（改完代码立刻重跑，很常见）时间戳会撞 —— 撞了就加序号，
+    否则「归档」退化成又一次覆盖，等于没做。
+
+    **时钟钉死在同一秒**，保证每次都真走撞名分支（理由见 `_FrozenClock`）。
+    """
+    _put_run(farm, "R01", "R01_2026-09-21_1000")
+    monkeypatch.setattr(farm_control, "datetime", _FrozenClock(datetime(2026, 10, 12, 14, 48, 30)))
+
+    _render(farm)
+    first = sorted((farm / "汇总").glob("aggregate_*.html"))
+    assert len(first) == 1, f"第一次汇总该留一份归档，实际 {[p.name for p in first]}"
+
+    _render(farm)
+    archived = sorted((farm / "汇总").glob("aggregate_*.html"))
+    assert len(archived) == 2, (
+        f"同一秒两次汇总该留两份归档，实际 {len(archived)} 份：{[p.name for p in archived]}"
+    )
+    assert set(first) <= set(archived), (
+        f"第一次那份必须还在，不能被覆盖：第一份 {[p.name for p in first]} / 现在 {[p.name for p in archived]}"
+    )
+    assert archived[0].name != archived[1].name, "两份归档不能同名"
+
+
+def test_aggregate_lists_the_suite_for_every_run(farm):
+    """汇总报告的「轮次」表也要有套件列 —— 从总报告要能直接对到磁盘上的目录。"""
+    _put_suite_run(farm, "R01", "R01_2026-09-29_1349", "launch")
+    _put_suite_run(farm, "R01", "R01_2026-09-29_1352", "unit")
+
+    html = _render(farm)
+
+    assert "<th>套件</th>" in html, "轮次表要有套件列"
+    line = _line_of(html, "R01_2026-09-29_1352", require="report.html")
+    assert "<td>unit</td>" in line, "轮次那一行要写出套件"
+    assert "results/R01/R01_2026-09-29_1352/report.html" in html, "轮次名要能点进该轮报告"

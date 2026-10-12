@@ -5,6 +5,8 @@
     dispatch  按套件并发预算生成任务文件，投到 farm_root/tasks/<node>.json
     status    看哪些节点还没交活
     aggregate 把 results/ 下各节点的 summary.json 汇总成一张「节点 × 用例」矩阵报告
+              顺带写 `results/<节点>/index.html`（目录名 ↔ 套件 ↔ 结果）和 `汇总/` 归档副本
+    index     只写各节点的轮次索引，不出矩阵报告（想快速对目录时用这个，快得多）
 
 ## 用法
 
@@ -272,8 +274,29 @@ def _node_creds_from_receipts(root: Path) -> dict[str, dict]:
     return out
 
 
-def cmd_aggregate(args) -> int:
-    root = farm_root()
+def _suite_of(run_dir: Path, summary: dict) -> str:
+    """这一轮跑的是什么套件 —— **目录名里没有，只能从证据里读**。
+
+    首选 `node_env.json` 的 `suite`（`farm_agent.py` 写的，权威）；老版本节点没这个文件时，
+    退化成 summary 里出现过的 module 名集合（如 `launch` 或 `launch+login`）。
+
+    存在的理由（2026-10-12 用户实报）：run 目录名只有「节点_日期_时刻」，
+    一个节点跑过 133 轮之后，`..._1349` 和 `..._1353` 谁是谁根本分不清，
+    更没法「拿报告去对应校验」。
+    """
+    env = _read_json(run_dir / NODE_ENV_EVIDENCE_NAME)
+    suite = str(env.get("suite") or "").strip()
+    if suite:
+        return suite
+    mods = sorted({str(c.get("module") or "") for c in (summary.get("cases") or []) if c.get("module")})
+    return "+".join(mods) if mods else "?"
+
+
+def _collect_nodes_data(root: Path) -> dict[str, dict]:
+    """扫 `results/<节点>/<轮次>/summary.json` 并按节点聚合。
+
+    `aggregate` 与 `index` 共用这一份扫描 —— 两处各写一份，口径迟早会漂。
+    """
     results_root = root / "results"
     if not results_root.is_dir():
         raise SystemExit(f"没有结果目录：{results_root}")
@@ -308,6 +331,8 @@ def cmd_aggregate(args) -> int:
                 "errors": summary.get("errors", 0),
                 "skipped": summary.get("skipped", 0),
                 "total": summary.get("total", 0),
+                "duration_s": summary.get("duration_s", 0),
+                "suite": _suite_of(run_dir, summary),
             }
             # 目录名按 `节点_日期_时刻[_n]` 排，字典序≈时间序，所以最后一条就是最新一轮
             bucket["latest_run"] = run_name
@@ -325,13 +350,70 @@ def cmd_aggregate(args) -> int:
     for node, bucket in nodes_data.items():
         if not bucket.get("credentials") and node in fallback_creds:
             bucket["credentials"] = fallback_creds[node]
+    return nodes_data
 
+
+def _write_node_indexes(root: Path, nodes_data: dict) -> list[Path]:
+    """给每个节点写一份 `results/<节点>/index.html`：目录名 ↔ 套件 ↔ 结果。
+
+    目录名不能改（`hall_auto/evidence.py` 的命名 + 节点侧 agent 已铺开，
+    改名要所有节点 pull 一次，收益不抵成本），所以在控制机侧补一张对照表。
+    """
+    written = []
+    for node, bucket in sorted(nodes_data.items()):
+        path = root / "results" / node / "index.html"
+        try:
+            path.write_text(_render_node_index(node, bucket), encoding="utf-8")
+        except OSError as exc:
+            print(f"⚠ 节点索引写失败 {path}：{exc}")
+            continue
+        written.append(path)
+    return written
+
+
+def cmd_index(args) -> int:
+    root = farm_root()
+    nodes_data = _collect_nodes_data(root)
+    if not nodes_data:
+        raise SystemExit("没有可汇总的结果（results/ 下没有 summary.json）")
+    written = _write_node_indexes(root, nodes_data)
+    for p in written:
+        print(f"节点索引：{p}")
+    return 0
+
+
+def cmd_aggregate(args) -> int:
+    root = farm_root()
+    nodes_data = _collect_nodes_data(root)
     if not nodes_data:
         raise SystemExit("没有可汇总的结果（results/ 下没有 summary.json）")
 
+    report_html = _render_matrix(nodes_data)
+
+    # 归档一份带时间戳的：根目录那个固定名会被下一轮直接覆盖，10-09 那份就是这么没的，
+    # 跨批次对比从此无据可查。根目录那份**保留** —— 手册/清单里承诺的就是那个路径，
+    # 挪走要同步《运行手册》《测试机操作手册》《新机操作清单》三份文档，不值当。
+    archive_dir = root / "汇总"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    # 时间戳只到秒 —— 同一秒连跑两次（改代码后立刻重跑，很常见）会互相覆盖，
+    # 那就把「归档」的意义丢了。撞了就加序号，跟 `evidence.new_run_dir` 一个口径。
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    archived = archive_dir / f"aggregate_{stamp}.html"
+    n = 1
+    while archived.exists():
+        n += 1
+        archived = archive_dir / f"aggregate_{stamp}_{n}.html"
+    archived.write_text(report_html, encoding="utf-8")
+
     out = root / "aggregate_report.html"
-    out.write_text(_render_matrix(nodes_data), encoding="utf-8")
+    out.write_text(report_html, encoding="utf-8")
+
+    indexes = _write_node_indexes(root, nodes_data)
+
     print(f"汇总报告：{out}")
+    print(f"归档副本：{archived}")
+    if indexes:
+        print(f"节点索引：{len(indexes)} 份（results\\<节点>\\index.html，目录名 ↔ 套件 ↔ 结果）")
     print(f"覆盖节点 {len(nodes_data)} 台，用例 {len({c for v in nodes_data.values() for c in v['cases']})} 条")
     for node in sorted(nodes_data):
         runs = nodes_data[node].get("runs", [])
@@ -427,9 +509,15 @@ def _render_matrix(nodes_data: dict) -> str:
         for run_name in bucket.get("runs", []):
             meta = bucket.get("run_meta", {}).get(run_name, {})
             latest = " ← 最新" if run_name == bucket.get("latest_run") else ""
+            # 轮次目录链到该轮自己的 report.html：从汇总报告要能一路点到现场。
+            # 「← 最新」必须留在 `<a>` 标签**内部** —— 单测按连续文本
+            # `R01_..._1000 ← 最新` 断言，标签夹在中间会把它切断。
+            link = (f'<a href="results/{html.escape(node)}/{html.escape(run_name)}/report.html">'
+                    f'{html.escape(run_name)}{latest}</a>')
             run_rows.append(
                 f"<tr><td>{html.escape(node)}</td>"
-                f"<td>{html.escape(run_name)}{latest}</td>"
+                f"<td>{html.escape(str(meta.get('suite', '?')))}</td>"
+                f"<td>{link}</td>"
                 f"<td>{html.escape(str(meta.get('finished_at', '')))}</td>"
                 f"<td>{meta.get('total', 0)}</td>"
                 f'<td style="color:{_COLOR["passed"]}">{meta.get("passed", 0)}</td>'
@@ -438,7 +526,7 @@ def _render_matrix(nodes_data: dict) -> str:
                 f"<td>{meta.get('skipped', 0)}</td></tr>"
             )
     if not run_rows:
-        run_rows.append('<tr><td colspan="8" class="na">没有可汇总的 run</td></tr>')
+        run_rows.append('<tr><td colspan="9" class="na">没有可汇总的 run</td></tr>')
 
     totals = {n: {o: sum(1 for c in nodes_data[n]["cases"].values() if c.get("outcome") == o)
                   for o in _OUTCOMES} for n in nodes}
@@ -474,7 +562,9 @@ def _render_matrix(nodes_data: dict) -> str:
 <div class="note"><b>这张表是跨轮次合并的。</b>一个节点可能这轮跑 launch、下轮跑 settings，
 所以同一个节点不同用例可能来自不同 run。鼠标悬停任意一格可看<b>它来自哪一轮</b>；
 带 <b>°</b> 的格子表示<b>本节点最新一轮没跑到这条</b>，用的是更早轮次的结果 —— 别当最新结论读。
-各轮的明细见下面「轮次」表。</div>
+各轮的明细见下面「轮次」表（含<b>套件</b>列，轮次名可点进该轮报告）。<br>
+<b>想去磁盘上核对某个目录是哪个套件？</b>看 <code>results\\&lt;节点&gt;\\index.html</code> —— 那份表把
+「目录名 ↔ 套件 ↔ 结果」并排列出，顺序与资源管理器一致。</div>
 
 <h2>各节点统计（跨轮合并后）</h2>
 <div class="tbl-scroll"><table><thead><tr><th>节点</th><th>通过</th><th>失败</th><th>错误</th><th>跳过</th></tr></thead><tbody>
@@ -482,7 +572,7 @@ def _render_matrix(nodes_data: dict) -> str:
 </tbody></table></div>
 
 <h2>轮次</h2>
-<div class="tbl-scroll"><table><thead><tr><th>节点</th><th>轮次</th><th>完成时间</th><th>用例</th><th>通过</th><th>失败</th><th>错误</th><th>跳过</th></tr></thead><tbody>
+<div class="tbl-scroll"><table><thead><tr><th>节点</th><th>套件</th><th>轮次</th><th>完成时间</th><th>用例</th><th>通过</th><th>失败</th><th>错误</th><th>跳过</th></tr></thead><tbody>
 {"".join(run_rows)}
 </tbody></table></div>
 
@@ -496,6 +586,152 @@ def _render_matrix(nodes_data: dict) -> str:
 {"".join(rows)}
 </tbody></table></div>
 </div></body></html>
+"""
+
+
+_INDEX_CSS = """
+ body{margin:0;background:#f6f8fa;color:#1f2328;font-family:"Microsoft YaHei","Segoe UI",system-ui,sans-serif;font-size:13px;}
+ .wrap{max-width:1200px;margin:0 auto;padding:24px 16px 64px;}
+ h1{font-size:20px;margin:0 0 4px;} h2{font-size:15px;margin:28px 0 8px;}
+ .meta{color:#656d76;margin-bottom:16px;line-height:1.7;}
+ table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d0d7de;border-radius:8px;overflow:hidden;}
+ th,td{border-bottom:1px solid #e4e8ec;padding:7px 10px;text-align:center;}
+ th{background:#eef1f4;font-size:12px;color:#656d76;}
+ td.run{text-align:left;font-family:Consolas,monospace;font-size:12px;white-space:nowrap;}
+ td.suite{text-align:left;font-weight:600;}
+ tr.latest{background:#f0f7ff;}
+ tr.latest td.suite{color:#185fa5;}
+ .tag{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:10px;background:#dbeafe;color:#185fa5;font-size:11px;}
+ a{color:#185fa5;text-decoration:none;} a:hover{text-decoration:underline;}
+ .toolbar{display:flex;gap:8px;align-items:center;margin:0 0 10px;flex-wrap:wrap;}
+ .toolbar input{flex:1;min-width:200px;padding:7px 11px;border:1px solid #d0d7de;border-radius:8px;font-size:13px;}
+ .btn{padding:6px 13px;border:1px solid #d0d7de;background:#fff;border-radius:18px;cursor:pointer;font-size:12px;}
+ .btn.active{background:#1f2328;color:#fff;border-color:#1f2328;}
+ .note{background:#fff8e6;border:1px solid #f0d9a0;border-radius:8px;padding:10px 12px;color:#6b5300;margin-bottom:14px;}
+ .empty{color:#9aa0a6;padding:14px;text-align:center;}
+"""
+
+_INDEX_JS = """
+ const rows=[...document.querySelectorAll('#tbl tbody tr')];
+ let f='all';
+ function apply(){
+   const q=document.getElementById('q').value.trim().toLowerCase();
+   rows.forEach(r=>{
+     const okF = f==='all' || r.dataset.suite===f;
+     const okQ = !q || r.dataset.text.toLowerCase().includes(q);
+     r.style.display=(okF&&okQ)?'':'none';
+   });
+ }
+ document.querySelectorAll('.btn').forEach(b=>b.onclick=()=>{
+   document.querySelectorAll('.btn').forEach(x=>x.classList.remove('active'));
+   b.classList.add('active'); f=b.dataset.f; apply();
+ });
+ document.getElementById('q').oninput=apply;
+"""
+
+
+def _verdict(meta: dict) -> str:
+    """一轮的结论标签。失败 > 错误 > 通过，顺序不能反。"""
+    if meta.get("failed"):
+        return f'<span style="color:{_COLOR["failed"]}">✗ {meta["failed"]} 条失败</span>'
+    if meta.get("errors"):
+        return f'<span style="color:{_COLOR["error"]}">! {meta["errors"]} 条错误</span>'
+    if meta.get("total"):
+        return f'<span style="color:{_COLOR["passed"]}">✓ 全通过</span>'
+    return '<span style="color:#9aa0a6">无记录</span>'
+
+
+def _render_node_index(node: str, bucket: dict) -> str:
+    """单节点轮次索引：**目录名 ↔ 套件 ↔ 结果**。
+
+    2026-10-12 用户实报：`LAPTOP-x_2026-09-29_1349` 这类目录名里只有节点和时间，
+    一个节点跑过 133 轮之后，资源管理器里完全分不清谁是谁，也没法「拿报告去对应校验」。
+    套件名本来就写在每轮的 `node_env.json` 里，只是没人把它摊到目录这一层 —— 这里补上。
+
+    表格按**目录名字典序**排（≈ 时间序），与资源管理器的顺序一致，方便左右对照。
+    """
+    runs = bucket.get("runs", [])
+    run_meta = bucket.get("run_meta", {})
+    latest = bucket.get("latest_run", "")
+
+    rows = []
+    for run_name in runs:
+        meta = run_meta.get(run_name, {})
+        suite = str(meta.get("suite") or "?")
+        is_latest = run_name == latest
+        tag = '<span class="tag">最新</span>' if is_latest else ""
+        link = f'<a href="./{html.escape(run_name)}/report.html">{html.escape(run_name)}</a>'
+        rows.append(
+            f'<tr class="{"latest" if is_latest else ""}" data-suite="{html.escape(suite)}" '
+            f'data-text="{html.escape(run_name + " " + suite)}">'
+            f'<td class="run">{link}{tag}</td>'
+            f'<td class="suite">{html.escape(suite)}</td>'
+            f'<td>{html.escape(str(meta.get("finished_at") or ""))}</td>'
+            f'<td>{meta.get("total", 0)}</td>'
+            f'<td style="color:{_COLOR["passed"]}">{meta.get("passed", 0)}</td>'
+            f'<td style="color:{_COLOR["failed"]}">{meta.get("failed", 0)}</td>'
+            f'<td style="color:{_COLOR["error"]}">{meta.get("errors", 0)}</td>'
+            f'<td style="color:{_COLOR["skipped"]}">{meta.get("skipped", 0)}</td>'
+            f'<td>{meta.get("duration_s", 0)}s</td></tr>'
+        )
+    if not rows:
+        rows.append('<tr><td colspan="9" class="empty">这个节点还没有任何一轮结果</td></tr>')
+
+    # 按套件归并：想「校验 login」的人不该从 133 行里翻
+    by_suite: dict[str, list[str]] = {}
+    for run_name in runs:
+        by_suite.setdefault(str(run_meta.get(run_name, {}).get("suite") or "?"), []).append(run_name)
+    suite_rows = []
+    for suite in sorted(by_suite):
+        names = by_suite[suite]
+        meta = run_meta.get(names[-1], {})
+        suite_rows.append(
+            f'<tr><td class="suite">{html.escape(suite)}</td>'
+            f'<td>{len(names)}</td>'
+            f'<td class="run"><a href="./{html.escape(names[-1])}/report.html">{html.escape(names[-1])}</a></td>'
+            f'<td>{html.escape(str(meta.get("finished_at") or ""))}</td>'
+            f'<td>{_verdict(meta)}</td></tr>'
+        )
+    if not suite_rows:
+        suite_rows.append('<tr><td colspan="5" class="empty">无</td></tr>')
+
+    buttons = ['<button class="btn active" data-f="all">全部套件</button>']
+    for suite in sorted(by_suite):
+        buttons.append(f'<button class="btn" data-f="{html.escape(suite)}">{html.escape(suite)}</button>')
+
+    profile = bucket.get("profile") or {}
+    env_bits = " &nbsp;·&nbsp; ".join(
+        p for p in (
+            f"系统: {html.escape(str(profile.get('os', '')))}" if profile.get("os") else "",
+            f"缩放: {profile.get('scale_percent', '?')}%",
+            f"分辨率: {html.escape(str(profile.get('screen', '')))}" if profile.get("screen") else "",
+            f"大厅: {html.escape(str(profile.get('hall_version', '')))}" if profile.get("hall_version") else "",
+        ) if p
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{html.escape(node)} · 轮次索引</title>
+<style>{_INDEX_CSS}</style></head><body><div class="wrap">
+<h1>{html.escape(node)} · 轮次索引</h1>
+<div class="meta">共 {len(runs)} 轮 &nbsp;·&nbsp; 最新一轮 <b>{html.escape(latest or "—")}</b>
+&nbsp;·&nbsp; 生成于 {html.escape(datetime.now().isoformat(timespec="seconds"))}<br>{env_bits}</div>
+
+<div class="note">左边「轮次目录」就是资源管理器里 <code>results\\{html.escape(node)}\\</code> 下的文件夹名，
+点进去是该轮的报告。<b>按套件筛一下</b>就能只留你关心的那几轮。</div>
+
+<h2>按套件看（每个套件最近一轮）</h2>
+<table><thead><tr><th style="text-align:left">套件</th><th>轮次数</th><th style="text-align:left">最近一轮</th><th>完成时间</th><th>结论</th></tr></thead><tbody>
+{"".join(suite_rows)}
+</tbody></table>
+
+<h2>全部轮次</h2>
+<div class="toolbar"><input id="q" type="text" placeholder="搜目录名 / 套件…">{"".join(buttons)}</div>
+<table id="tbl"><thead><tr><th style="text-align:left">轮次目录</th><th style="text-align:left">套件</th><th>完成时间</th><th>用例</th><th>通过</th><th>失败</th><th>错误</th><th>跳过</th><th>耗时</th></tr></thead><tbody>
+{"".join(rows)}
+</tbody></table>
+</div><script>{_INDEX_JS}</script></body></html>
 """
 
 
@@ -526,6 +762,9 @@ def main() -> int:
 
     p_agg = sub.add_parser("aggregate", help="汇总成节点×用例矩阵")
     p_agg.set_defaults(func=cmd_aggregate)
+
+    p_idx = sub.add_parser("index", help="只出各节点的轮次索引（目录名 ↔ 套件 ↔ 结果）")
+    p_idx.set_defaults(func=cmd_index)
 
     args = parser.parse_args()
     return args.func(args)
