@@ -1,0 +1,452 @@
+meta:
+  说明: 用例清单唯一真源。脚本只读它，从不写回。改动请只改这个文件。
+  最后更新: '2026-10-12'
+  字段说明: id 编号 / title 用例名 / suite 套件(见 hall_auto/suites.py) / marker pytest 标记 / tier code=逻辑在代码里 data=参数化数据驱动 / kind case=业务用例 probe=探针 / status active|manual|xfail|destructive / verify 具体验证什么 / ref 代码指针 / needs 运行前提
+  编号规则: P0 沿用原清单编号；其余按组自编 P1A/P1B/P1C/P1D/P2S(安全)/P2W(WorkBuddy)
+cases:
+- id: P0-01
+  title: 干净安装基线包
+  suite: install
+  marker:
+  - install
+  - destructive
+  tier: code
+  kind: case
+  status: active
+  verify: 全新装完基线安装包后，注册表里的版本号与客户端「关于」页显示的版本一致
+  ref: tests/install/test_p0_install.py::test_p0_01_install_baseline
+  needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1 + installer_dir 下有安装包
+- id: P0-02
+  title: 基线升级最新包
+  suite: install
+  marker:
+  - install
+  - destructive
+  tier: code
+  kind: case
+  status: active
+  verify: 从基线升级到最新包后，注册表版本与「关于」页版本都等于最新包的版本
+  ref: tests/install/test_p0_install.py::test_p0_02_upgrade_latest
+  needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1 + installer_dir 下有安装包
+- id: P0-03
+  title: 启动主窗口
+  suite: launch
+  marker:
+  - launch
+  - smoke
+  tier: code
+  kind: case
+  status: active
+  verify: 主窗口标题正确，且首页必备控件结构齐全（不缺件）
+  ref: tests/launch/test_p0_launch.py::test_p0_03_launch_window
+  needs: 本机已装大厅
+- id: P0-04
+  title: 冷启动稳定性
+  suite: launch
+  marker:
+  - launch
+  - smoke
+  tier: code
+  kind: case
+  status: active
+  verify: 连续多次冷启动，每次首页的控件结构完全一致（不偶发缺件/错位）
+  ref: tests/launch/test_p0_launch.py::test_p0_04_ready_cold_starts
+  needs: 本机已装大厅
+- id: P0-06
+  title: 搜索命中
+  suite: launch
+  marker:
+  - launch
+  - smoke
+  tier: code
+  kind: case
+  status: active
+  verify: 输入关键词后，搜索结果里命中的标题数量达标
+  ref: tests/launch/test_p0_search.py::test_p0_06_search_lists_keyword_titles
+  needs: 本机已装大厅
+- id: P0-07
+  title: 详情页
+  suite: launch
+  marker:
+  - launch
+  - smoke
+  tier: code
+  kind: case
+  status: active
+  verify: 点进详情页，标题与搜索结果一致，且有主操作按钮
+  ref: tests/launch/test_p0_search.py::test_p0_07_detail_shows_name_and_primary_button
+  needs: 本机已装大厅
+- id: P1A-01
+  title: 三页签刷新
+  suite: apps-detect
+  marker:
+  - apps
+  tier: code
+  kind: case
+  status: active
+  verify: 「我的应用 / 同步 / 更新」三个页签都能刷出数据；列表为空时能区分「本来就没有」和「接口失败」两种情况
+  ref: tests/launch/test_p1_apps.py::test_mine_lists_refresh
+  needs: 本机已装大厅；不需要管理员
+- id: P1A-02
+  title: 夹具真装真卸 destructive
+  suite: apps-lifecycle
+  marker:
+  - apps
+  - destructive
+  tier: code
+  kind: case
+  status: destructive
+  verify: 用大厅把夹具应用装上后注册表出现条目，再卸掉后条目消失（装/卸都真发生）
+  ref: tests/launch/test_p1_apps.py::test_fixture_install_then_uninstall
+  needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1
+- id: P1A-03
+  title: 大厅内更新夹具 destructive
+  suite: apps-lifecycle
+  marker:
+  - apps
+  - destructive
+  tier: code
+  kind: case
+  status: destructive
+  verify: 把夹具钉在老版本，点大厅的「更新」按钮，版本要升到更新向导标题声明的目标版本
+  ref: tests/launch/test_p1_apps.py::test_update_fixture_via_hall
+  needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1
+- id: P1A-04
+  title: 同步列表（登录态）login
+  suite: apps-detect
+  marker:
+  - apps
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 登录后同步页能刷出「其他电脑已装的应用」；只读断言，绝不点任何安装按钮
+  ref: tests/launch/test_p1_apps.py::test_sync_list_logged_in
+  needs: 本机已装大厅；不需要管理员
+- id: P1B-01
+  title: 登录弹窗控件图
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 手机号、密码、协议勾选、登录、找回、注册入口齐全；切到短信页签后出现验证码输入框
+  ref: tests/launch/test_p1_login.py::test_login_dialog_controls
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1B-02
+  title: 账号密码登录 login
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 填手机号 + 密码、勾协议、点登录后进入已登录态，用户区显示对应手机号尾号
+  ref: tests/launch/test_p1_login.py::test_password_login_success
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1B-03
+  title: 退出登录 login
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 已登录态点退出后回到未登录态，登录弹窗自动关闭
+  ref: tests/launch/test_p1_login.py::test_logout_returns_to_anonymous
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1B-04
+  title: 微软账号 SSO 免密登录
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 填邮箱 → 下一步 → 点缓存账号磁贴走 SSO 免密 → 断言已登录 → finally 还原登出
+  ref: tests/launch/test_p1_login.py::test_microsoft_login_sso
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+  notes: 本机绑过手机号才过（绑定按机器生效，每台新机各做一次）
+- id: P1B-05
+  title: 微软邮箱验证码登录 人在环
+  suite: login-manual
+  marker:
+  - login
+  - manual
+  tier: code
+  kind: case
+  status: manual
+  verify: 点【发送验证码】→ 人工开邮箱取码回填 → 断言已登录 → 还原登出
+  ref: tests/launch/test_p1_login.py::test_microsoft_login_code_manual
+  needs: 人在环：交互式终端 + HALL_TEST_USER / PASSWORD / NEW_PASSWORD
+  notes: 走免密分支的机器上会先 skip（test_p1_login.py:277 判 account_picker）
+- id: P1B-06
+  title: 短信登录 人在环
+  suite: login-manual
+  marker:
+  - login
+  - manual
+  tier: code
+  kind: case
+  status: manual
+  verify: 脚本发验证码后停下，等人工回填手机收到的码，再断言登录成功
+  ref: tests/launch/test_p1_login.py::test_sms_login_manual
+  needs: 人在环：交互式终端 + HALL_TEST_USER / PASSWORD / NEW_PASSWORD
+- id: P1B-07
+  title: 忘记密码往返 人在环
+  suite: login-manual
+  marker:
+  - login
+  - manual
+  tier: code
+  kind: case
+  status: manual
+  verify: 真改密码 → 用新密码重新登录验证 → 再还原回原密码（做→验证→还原的可逆往返）。本轮可选「不测」跳过，省 2 个短信码
+  ref: tests/launch/test_p1_login.py::test_forgot_password_reset_manual
+  needs: 人在环：交互式终端 + HALL_TEST_USER / PASSWORD / NEW_PASSWORD
+  notes: 2026-10-10 实付：往返「人工放弃」（753s，密码未改）→ 该轮未覆盖，疑似短信超限
+- id: P1C-01
+  title: 注册页控件图
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 手机号、验证码、发送、密码、确认密码、协议、注册按钮齐全
+  ref: tests/launch/test_p1_register.py::test_register_controls_present
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1C-02
+  title: 注册按钮门禁
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 未勾协议或密码为空时按钮禁用；四项合法且勾选协议后才可点
+  ref: tests/launch/test_p1_register.py::test_register_submit_gate
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1C-03
+  title: 非法密码拦截（参数化）
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 过短 / 纯数字 / 含中文 / 过长 / 为空 / 两次不一致 —— 每种都禁用按钮且对应提示变红
+  ref: tests/launch/test_p1_register.py::test_register_invalid_password_blocks_submit
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1C-04
+  title: 合法密码放行
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: active
+  verify: 密码合法时按钮可用，且两行密码提示保持灰色不变红
+  ref: tests/launch/test_p1_register.py::test_register_valid_password_keeps_tips_gray
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+- id: P1C-05
+  title: 错误验证码反馈（xfail 疑似缺陷）
+  suite: login
+  marker:
+  - login
+  tier: code
+  kind: case
+  status: xfail
+  verify: 不发码直接提交，应有 toast / 红字 / 关窗任一反馈；当前疑似无反馈，标 xfail 跟踪
+  ref: tests/launch/test_p1_register.py::test_register_wrong_code_shows_feedback
+  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
+  notes: 2026-10-10 XPASS —— 疑似缺陷已修或判据失效，待与开发确认
+- id: P1D-01
+  title: 主题控件图
+  suite: settings
+  marker:
+  - settings
+  tier: code
+  kind: case
+  status: active
+  verify: 浅色 / 深色 / 跟随系统三档齐全，且当前有且仅有一档处于选中态
+  ref: tests/launch/test_p1_theme.py::test_theme_controls_present
+  needs: 本机已装大厅；会改外观档位，收尾自动还原
+- id: P1D-02
+  title: 主题切换持久化
+  suite: settings
+  marker:
+  - settings
+  tier: code
+  kind: case
+  status: active
+  verify: 切深色后主窗真变暗、且重启客户端后仍保持深色；再切浅色真变亮，深浅两态的亮度差达标
+  ref: tests/launch/test_p1_theme.py::test_theme_switch_applies_and_survives_restart
+  needs: 本机已装大厅；会改外观档位，收尾自动还原
+- id: P2S-01
+  title: 安装包全签名
+  suite: security
+  marker:
+  - security
+  tier: code
+  kind: case
+  status: active
+  verify: 安装包里所有可签名文件都带有效数字签名
+  ref: tests/launch/test_p2_security.py::test_package_all_signed
+  needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
+- id: P2S-02
+  title: 个人空间盘全签名
+  suite: security
+  marker:
+  - security
+  tier: code
+  kind: case
+  status: active
+  verify: 个人空间盘目录里的可签名文件全部有有效签名
+  ref: tests/launch/test_p2_security.py::test_personal_storage_all_signed
+  needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
+- id: P2S-03
+  title: 控制面板信息一致
+  suite: security
+  marker:
+  - security
+  tier: code
+  kind: case
+  status: active
+  verify: 控制面板「卸载程序」里的大厅条目与实际已装的大厅一致
+  ref: tests/launch/test_p2_security.py::test_control_panel_info
+  needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
+- id: P2S-04
+  title: 签章检查报告无异常
+  suite: security
+  marker:
+  - security
+  tier: code
+  kind: case
+  status: active
+  verify: 签章检查报告里没有 ECC（异常/错误）项
+  ref: tests/launch/test_p2_security.py::test_signcheck_report_no_ecc
+  needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
+- id: P2S-05
+  title: 清单双向对比
+  suite: security
+  marker:
+  - security
+  tier: code
+  kind: case
+  status: active
+  verify: 安全清单文件与安装包实际清单对比一致（集合相等，任一方向有差异都判失败）
+  ref: tests/launch/test_p2_security.py::test_manifest_matches_package
+  needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
+- id: P2W-01
+  title: WB 双图标并存
+  suite: wb
+  marker:
+  - wb
+  tier: code
+  kind: case
+  status: active
+  verify: WB 入口图标出现在原入口旁边，两者并存
+  ref: tests/launch/test_p2_workbuddy.py::test_wb_dual_icon_beside_original
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: P2W-02
+  title: 点击跳详情页
+  suite: wb
+  marker:
+  - wb
+  tier: code
+  kind: case
+  status: active
+  verify: 点 WB 入口能在大厅内跳进 WB 详情页（以「一键安装」为落点标志），绝不点一键安装
+  ref: tests/launch/test_p2_workbuddy.py::test_wb_click_jumps_in_hall_detail
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: P2W-03
+  title: 快速连点防抖
+  suite: wb
+  marker:
+  - wb
+  tier: code
+  kind: case
+  status: active
+  verify: 连续快速点击 WB 入口不会重复弹出/错乱（有防抖）
+  ref: tests/launch/test_p2_workbuddy.py::test_wb_rapid_click_debounce
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: P2W-04
+  title: 入口是静态图
+  suite: wb
+  marker:
+  - wb
+  tier: code
+  kind: case
+  status: active
+  verify: 连续采样窗口内 WB 入口是静态图（非动画）
+  ref: tests/launch/test_p2_workbuddy.py::test_wb_icon_is_static
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: P2W-05
+  title: 原入口回归
+  suite: wb
+  marker:
+  - wb
+  tier: code
+  kind: case
+  status: active
+  verify: 加了 WB 入口后，原有入口行为不受影响（回归）
+  ref: tests/launch/test_p2_workbuddy.py::test_original_entry_regression
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: P2W-06
+  title: 已装则直接拉起 destructive
+  suite: wb
+  marker:
+  - wb
+  - destructive
+  tier: code
+  kind: case
+  status: destructive
+  verify: WB 已安装时，点左下角 WB 入口应直接拉起 WB 程序（不再跳详情页/浏览器）
+  ref: tests/launch/test_p2_workbuddy.py::test_wb_installed_entry_launches_wb
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: P2W-07
+  title: 隐私协议门禁
+  suite: wb
+  marker:
+  - wb
+  tier: code
+  kind: case
+  status: active
+  verify: 首跑未同意隐私协议的状态下，WB 入口按门禁规则行为（未同意不放行）
+  ref: tests/launch/test_p2_workbuddy.py::test_wb_entry_gated_by_privacy_agreement
+  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+- id: PRB-01
+  title: 只读探针：我的三个列表 + 公网可达性
+  suite: probe
+  marker:
+  - launch
+  tier: code
+  kind: probe
+  status: active
+  verify: 打印三个列表条目 + 公网可达性，然后以 skip 收尾，把事实带进证据与日志
+  ref: tests/launch/test_p0_probe.py::test_probe_mine_lists_and_net
+  needs: 本机已装大厅；只读探针，不点按钮不装不卸不登录
+  notes: 不是业务用例，是排障探针；导出时默认不列
+
+- id: P2X-01
+  title: 会员入口与权益页抽检
+  suite: ''
+  marker: []
+  tier: code
+  kind: case
+  status: todo
+  verify: 至少两个身份（非会员 / 会员）——只断言入口可见性、权益页能打开、无权限操作有明确拦截；不把具体价格文案写死
+  needs: ''
+  notes: 尚未自动化。来源：主流程自动化设计.md「P2 易变内容（抽检）」。还没有对应套件，要进跑批得先在 hall_auto/suites.py 开一个
+- id: P2X-02
+  title: 活动入口与跳转抽检
+  suite: ''
+  marker: []
+  tier: code
+  kind: case
+  status: todo
+  verify: 只断言活动入口存在、能打开、外链/内开跳转发生；素材/时间/文案标「内容易变」，活动下线时整套跳过而不报红
+  needs: ''
+  notes: 尚未自动化。来源同上。同 P2X-01，没有对应套件
