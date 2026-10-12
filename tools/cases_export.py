@@ -232,8 +232,12 @@ def main() -> int:
         print(f"[OK] 已生成 {target}（{target.stat().st_size} 字节）")
     elif args.format == "csv":
         target = Path(args.out) if args.out else Path.cwd() / "测试清单.csv"
-        target.write_text(render_csv(doc, args.include_probe), encoding="utf-8-sig")
-        print(f"[OK] 已生成 {target}（utf-8-sig，Excel 可直接双击）")
+        # ⚠️ **必须带 newline=""** —— `csv.writer` 自己就输出 `\r\n`，而 `write_text` 默认会把
+        # `\n` 再翻成 `\r\n`，于是文件里变成 **`\r\r\n`**：Excel 打开是一堆空行，
+        # `csv.reader` 也会把每行读成两行（2026-10-12 实测：39 条读成 79 条）。
+        # 同理不能省 `encoding="utf-8-sig"` —— 少了 BOM，Excel 打开中文是乱码。
+        target.write_text(render_csv(doc, args.include_probe), encoding="utf-8-sig", newline="")
+        print(f"[OK] 已生成 {target}（utf-8-sig + 无多余换行，Excel 可直接双击）")
     else:
         target = Path(args.out) if args.out else Path.cwd() / "cases.json"
         target.write_text(render_zentao_json(doc, args.include_probe), encoding="utf-8")

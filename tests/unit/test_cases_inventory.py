@@ -213,6 +213,46 @@ def test_exported_checklist_is_up_to_date():
     )
 
 
+def test_csv_export_cli_produces_a_clean_file(tmp_path):
+    """**跑真 CLI** 导出 CSV，验它没有 `\\r\\r`、且行数与用例数一致。
+
+    为什么要跑 CLI 而不是只调 `render_csv`：问题出在**写盘那一步** ——
+    `csv.writer` **自己就输出 `\\r\\n`**，而 `Path.write_text()` 默认会把 `\\n` 再翻成 `\\r\\n`，
+    于是文件里成了 `\\r\\r\\n`：**Excel 打开是一堆空行，`csv.reader` 把每行读成两行**
+    （2026-10-12 实测：39 条用例读成 79 条）。修法是写 CSV 时带 `newline=""` ——
+    只调 `render_csv` 是测不到这条的。
+    """
+    import csv as _csv
+    import subprocess
+
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    import importlib
+
+    mod = importlib.import_module("cases_export")
+    out = tmp_path / "x.csv"
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8", str(REPO_ROOT / "tools" / "cases_export.py"),
+         "--format", "csv", "--out", str(out)],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    assert proc.returncode == 0, f"导出失败：\n{proc.stdout}\n{proc.stderr}"
+    assert out.is_file(), "没生成文件"
+
+    raw = out.read_bytes()
+    assert b"\r\r" not in raw, (
+        "CSV 里有 \\r\\r —— `csv.writer` 的 \\r\\n 被 write_text 又翻了一遍。"
+        "write_text 必须带 newline=''（否则 Excel 里全是空行）"
+    )
+    assert raw.startswith(b"\xef\xbb\xbf"), "少了 utf-8 BOM，Excel 打开中文会乱码"
+
+    with open(out, encoding="utf-8-sig", newline="") as fh:
+        rows = list(_csv.reader(fh))
+    want = len(mod._visible(_load_doc(), False))
+    assert len(rows) - 1 == want, (
+        f"csv.reader 读出 {len(rows) - 1} 行，用例数是 {want} —— 对不上，多半是换行被翻了两遍"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 守卫自检（负路径）—— 证明「坏输入真的会被判红」
 # ---------------------------------------------------------------------------
