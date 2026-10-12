@@ -88,7 +88,7 @@ cases:
   ref: tests/launch/test_p1_apps.py::test_mine_lists_refresh
   needs: 本机已装大厅；不需要管理员
 - id: P1A-02
-  title: 夹具真装真卸 destructive
+  title: 夹具真装真卸
   suite: apps-lifecycle
   marker:
   - apps
@@ -100,7 +100,7 @@ cases:
   ref: tests/launch/test_p1_apps.py::test_fixture_install_then_uninstall
   needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1
 - id: P1A-03
-  title: 大厅内更新夹具 destructive
+  title: 大厅内更新夹具
   suite: apps-lifecycle
   marker:
   - apps
@@ -112,7 +112,7 @@ cases:
   ref: tests/launch/test_p1_apps.py::test_update_fixture_via_hall
   needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1
 - id: P1A-04
-  title: 同步列表（登录态）login
+  title: 同步列表（登录态）
   suite: apps-detect
   marker:
   - apps
@@ -135,7 +135,7 @@ cases:
   ref: tests/launch/test_p1_login.py::test_login_dialog_controls
   needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
 - id: P1B-02
-  title: 账号密码登录 login
+  title: 账号密码登录
   suite: login
   marker:
   - login
@@ -146,7 +146,7 @@ cases:
   ref: tests/launch/test_p1_login.py::test_password_login_success
   needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
 - id: P1B-03
-  title: 退出登录 login
+  title: 退出登录
   suite: login
   marker:
   - login
@@ -439,7 +439,7 @@ cases:
   ref: tests/launch/test_p2_workbuddy.py::test_original_entry_regression
   needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
 - id: P2W-06
-  title: 已装则直接拉起 destructive
+  title: 已装则直接拉起
   suite: wb
   marker:
   - wb

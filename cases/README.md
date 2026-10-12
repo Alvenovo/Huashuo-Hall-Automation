@@ -16,6 +16,51 @@ cases/清单.md       ← 导出物（别手改），人看的表格版
 
 ---
 
+## 用例文件放哪、怎么按它跑
+
+**默认路径**：`cases/cases.yaml`（仓库内）。要换地方放，两种办法：
+
+```powershell
+# 只这一次
+.venv\Scripts\python.exe -X utf8 tools\run_cases.py --cases "D:\跑批\用例\文件A.yaml"
+
+# 长期生效（推荐，脚本自己去找）
+$env:HALL_CASES_FILE = "D:\跑批\用例\文件A.yaml"
+```
+
+优先级：`--cases` > 环境变量 `HALL_CASES_FILE` > 默认 `cases/cases.yaml`。
+**相对路径按仓库根解析**（不是当前目录）—— 免得同一份配置在不同目录跑出不同结果。
+每次运行都会打印 `[用例文件] <实际用的绝对路径>`，一眼能看出找的是哪一份。
+
+### 执行：全部 / 一部分
+
+```powershell
+# 跑文件里所有可跑的用例
+.venv\Scripts\python.exe -X utf8 tools\run_cases.py
+
+# 先看一眼会跑什么，不真跑（建议每次都先来这个）
+.venv\Scripts\python.exe -X utf8 tools\run_cases.py --list
+
+# 只跑指定的几条编号
+.venv\Scripts\python.exe -X utf8 tools\run_cases.py --ids P0-03,P1C-03
+
+# 按套件 / 按状态挑
+.venv\Scripts\python.exe -X utf8 tools\run_cases.py --suite login
+.venv\Scripts\python.exe -X utf8 tools\run_cases.py --status xfail
+```
+
+### 默认挡住哪些（**不是可选项**）
+
+| 情况 | 默认 | 要跑怎么开 |
+| --- | --- | --- |
+| `status: manual`（人在环，会**真发短信**、`input()` 会**永久阻塞**） | 不选 | `--allow-manual`，且必须**交互式终端**（脚本自动加 `-s`） |
+| `status: destructive` / 套件是 `install`、`apps-lifecycle`（**真装真卸**） | 不选 | `--allow-destructive` 或 `HALL_ALLOW_INSTALL=1` |
+| `status: todo`（还没自动化） | 不选 | 没代码可跑，只能先补测试函数 |
+
+被挡掉的每一条都会**打印理由**，不会静默消失。
+
+⚠️ 本脚本**不做并发**。20 台同时跑、提权通道、并发预算那套归 `tools/run_farm.py`。
+
 ## 三种操作
 
 ### 加一条用例
