@@ -39,6 +39,8 @@ from typing import Any, Callable
 PAGES: dict[str, tuple[str, str]] = {
     "register": ("注册页", "hall_auto.register:register_controls"),
     "settings_theme": ("设置页·主题三档", "hall_auto.settings:theme_state"),
+    "login_dialog": ("登录弹窗（默认页签）", "hall_auto.login:login_field_aids"),
+    "login_sms_tab": ("登录弹窗·短信验证码页签", "hall_auto.login:login_sms_tab_fields"),
 }
 
 _PAGE_CACHE: dict[str, Callable[[int], dict[str, Any]]] = {}

@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from hall_auto import drivers
 from hall_auto.console import focus_console
 from hall_auto.launch import LaunchError, start_fresh, wait_main_window, wait_until_ready
 from hall_auto.login import (
@@ -18,7 +19,6 @@ from hall_auto.login import (
     find_bind_dialog,
     handle_bind_phone_popup,
     login_dialog_open,
-    login_field_aids,
     login_with_password,
     login_with_password_value,
     login_with_sms_code,
@@ -35,7 +35,6 @@ from hall_auto.login import (
     submit_forgot_reset,
     submit_microsoft_code,
     submit_microsoft_email,
-    switch_login_tab,
     wait_microsoft_logged_in,
     wait_microsoft_logged_in_or_bind,
     wait_microsoft_state,
@@ -111,23 +110,29 @@ def ready_pid(cfg, installed):
 
 
 @pytest.mark.login
-def test_login_dialog_controls(ready_pid):
-    """P1-B 登录弹窗控件图：手机号/密码/协议/登录/找回/注册齐全，短信页签切换后出验证码框"""
+def test_login_dialog_controls(ready_pid, case):
+    """P1-B 登录弹窗控件图（默认页签）：手机号/密码/协议/登录/找回/注册齐全
+
+    期望控件在 `cases/cases.yaml`（编号 P1B-01a）—— 改期望只改 YAML。
+    """
     logout(ready_pid)
     open_login_dialog(ready_pid)
-    fields = login_field_aids(ready_pid)
-    assert "MobileInputBox" in fields, f"缺手机号输入框: {fields}"
-    assert "PasswordSecInput" in fields, f"缺密码输入框: {fields}"
-    assert "agree" in fields, f"缺同意协议复选框: {fields}"
-    assert "登录" in fields, f"缺登录按钮: {fields}"
-    assert "忘记密码" in fields and "注册账号" in fields, f"缺找回/注册入口: {fields}"
-    switch_login_tab(
-        ready_pid,
-        "短信验证码登录",
-        ready=lambda: _by_aid(ready_pid, "Edit", "CodeInput") is not None,
-    )
-    sms = login_field_aids(ready_pid)
-    assert "CodeInput" in sms, f"短信页签缺验证码输入框: {sms}"
+    drivers.run(case["driver"], case["page"], ready_pid, case)
+
+
+@pytest.mark.login
+def test_login_sms_tab_controls(ready_pid, case):
+    """P1-B 登录弹窗控件图（短信验证码页签）：切过去后出现验证码输入框
+
+    期望控件在 `cases/cases.yaml`（编号 P1B-01b）。切页签这个**动作**在
+    `hall_auto/login.py::login_sms_tab_fields` —— 交互是代码、期望是数据。
+
+    2026-10-12 从原 `test_login_dialog_controls` 拆出来：原来一条用例里
+    「先断言默认页签、再切页签断言」两段，期望值没法全外置。拆开后两条都能纯数据驱动。
+    """
+    logout(ready_pid)
+    open_login_dialog(ready_pid)
+    drivers.run(case["driver"], case["page"], ready_pid, case)
     assert "CodeSendBtn" in sms, f"短信页签缺发送验证码按钮: {sms}"
     assert "PasswordSecInput" not in sms, f"切到短信页签后密码框应消失: {sms}"
 

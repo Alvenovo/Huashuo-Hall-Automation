@@ -276,6 +276,20 @@ def login_field_aids(pid: int) -> dict[str, str]:
     return found
 
 
+def login_sms_tab_fields(pid: int) -> dict[str, str]:
+    """切到「短信验证码登录」页签**之后**的控件现状（给用例驱动模板用，2026-10-12）。
+
+    切页签这个**动作**放在这里，是为了让「期望哪些控件」留在用例文件里 ——
+    这正是驱动模板的分工：**交互在代码，期望在数据**。
+    """
+    switch_login_tab(
+        pid,
+        "短信验证码登录",
+        ready=lambda: _by_aid(pid, "Edit", "CodeInput") is not None,
+    )
+    return login_field_aids(pid)
+
+
 def logout(pid: int) -> None:
     """已登录时点用户区会开独立菜单窗（标题「华硕应用商店」），内有退出登录。
 
