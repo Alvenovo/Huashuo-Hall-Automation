@@ -170,6 +170,24 @@ def test_register_controls_present(register_pid, case):
 
 ---
 
+## 导出成 Word（给人看的发放版）
+
+```powershell
+# 1) 生成 md 视图（= cases/清单.md）
+.venv\Scripts\python.exe -X utf8 tools\cases_export.py --format md
+
+# 2) 转 Word（需要本机装了 Word / WPS）
+.venv\Scripts\python.exe -X utf8 tools\md_to_docx.py cases\清单.md
+#    → 生成 cases\清单.docx，拷到桌面 / 发人
+```
+
+⚠️ `cases/清单-发放版.md` / `.docx` 是**导出物，不进 git**（跟知识库那两份 docx 一个口径）。
+**真源永远是 `cases/cases.yaml`。**
+
+⚠️ 桌面那份 `测试清单.docx` 里有一节「二、单元守卫」，**它不在真源里**（是 2026-09-29
+手写版沿用过来的，可能已经过期）。重出时别把它丢了 —— 它跟功能用例不是一回事。
+手写版原件备份在 `交接归档/测试清单-手写版备份-20261012.docx`（本机专属）。
+
 ## 字段速查
 
 | 字段 | 必填 | 说明 |
