@@ -155,8 +155,11 @@ cases:
   page: login_sms_tab
   expect:
   - CodeInput
-  verify: 切到「短信验证码登录」页签后，出现验证码输入框
-  notes: 2026-10-12 从原 P1B-01 拆出；切页签这个动作在 hall_auto/login.py::login_sms_tab_fields
+  - CodeSendBtn
+  verify: 切到「短信验证码登录」页签后：出现验证码输入框与「发送验证码」按钮，且密码输入框消失
+  notes: 2026-10-12 从原 P1B-01 拆出；2026-10-13 把原代码里那两条断言（要有 CodeSendBtn、密码框应消失）搬进 expect/expect_absent。切页签这个动作在 hall_auto/login.py::login_sms_tab_fields
+  expect_absent:
+  - PasswordSecInput
 - id: P1B-02
   title: 账号密码登录
   suite: login
@@ -304,18 +307,18 @@ cases:
     - true
     - true
   - name: mismatch
-    password: <合法密码>
+    password: Abcdef123
     confirm: Abcdef124
     expect_tips:
     - false
     - true
   - name: empty-confirm
-    password: <合法密码>
+    password: Abcdef123
     confirm: ''
     expect_tips:
     - false
     - true
-  notes: 参数表已外置到本文件（2026-10-12 第 3 步试水）；改参数只改这里，不碰 Python
+  notes: 参数表已外置到本文件（2026-10-12 第 3 步试水）；改参数只改这里，不碰 Python；2026-10-13 修正：mismatch/empty-confirm 原来写的是字面量 '<合法密码>'，被当真密码填进输入框导致永远红
 - id: P1C-04
   title: 合法密码放行
   suite: login

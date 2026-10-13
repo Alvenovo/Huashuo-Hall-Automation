@@ -132,8 +132,6 @@ def test_cases_login_sms_tab(ready_pid, case):
     logout(ready_pid)
     open_login_dialog(ready_pid)
     drivers.run(case["driver"], case["page"], ready_pid, case)
-    assert "CodeSendBtn" in sms, f"短信页签缺发送验证码按钮: {sms}"
-    assert "PasswordSecInput" not in sms, f"切到短信页签后密码框应消失: {sms}"
 
 
 @pytest.mark.login

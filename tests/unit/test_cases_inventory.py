@@ -332,3 +332,128 @@ def test_page_bound_funcs_live_next_to_their_fixture():
         assert func in _funcs_in_file(rel), (
             f"page={page!r} 登记的 {ref} 不存在 —— 通用用例函数必须在它那个页面的测试文件里"
         )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-13 加：这次测试机跑批暴露的 3 条红，全是改造引入的，各配一条守卫
+# ---------------------------------------------------------------------------
+
+
+def _undefined_names_in(path: Path) -> list[str]:
+    """`测试函数里引用了、但在模块作用域和内置里都找不到的名字`。
+
+    用标准库 `symtable` 判作用域：函数体里 `is_global()` 的名字（不是局部变量、不是闭包）
+    必须能在**模块作用域**（import / 赋值 / def / class）或**内置**里找到。
+
+    为什么需要：2026-10-13 拆 `test_login_sms_tab_controls` 时漏了两行残行
+    （`assert "CodeSendBtn" in sms`），而 `sms` 已经不存在 —— pytest 当场报
+    `NameError`。这种"改一半"的残留**只在跑那条用例时才炸**，而且是在测试机上炸。
+    静态查一遍几毫秒，不用等真机。
+    """
+    import builtins
+    import symtable
+
+    src = path.read_text(encoding="utf-8")
+    top = symtable.symtable(src, str(path), "exec")
+    module_names = {
+        s.get_name() for s in top.get_symbols()
+        if s.is_assigned() or s.is_imported() or s.is_namespace()
+    }
+    module_names |= set(dir(builtins))
+
+    bad: list[str] = []
+
+    def _walk(table, where: str) -> None:
+        for child in table.get_children():
+            name = f"{where}.{child.get_name()}" if where else child.get_name()
+            if child.get_type() == "function":
+                for sym in child.get_symbols():
+                    n = sym.get_name()
+                    if sym.is_global() and n not in module_names:
+                        bad.append(f"{path.name}::{name} 引用了不存在的名字 {n!r}")
+            _walk(child, name)
+
+    _walk(top, "")
+    return bad
+
+
+def test_no_test_function_references_an_undefined_name():
+    """**静态**查 `tests/launch` + `tests/install`：不许有「引用了不存在的名字」。
+
+    这条能拦住「改一半」的残行 —— 它们只在跑那条用例时才炸，而那条用例往往
+    只在测试机上跑（2026-10-13 就是这么在真机上炸了 1 条）。
+    """
+    problems: list[str] = []
+    for d in (REPO_ROOT / "tests" / "launch", REPO_ROOT / "tests" / "install"):
+        for f in sorted(d.glob("test_*.py")):
+            problems += _undefined_names_in(f)
+    assert not problems, "有测试函数引用了不存在的名字（改一半的残留？）：\n  " + "\n  ".join(problems)
+
+
+def test_case_params_have_no_placeholder_values():
+    """**参数值和期望列表里不许出现 `<...>` 这种占位符** —— YAML 没有变量替换。
+
+    2026-10-13 实付：`password: "<合法密码>"` 本意是"填合法密码"，
+    但它就是字面量 —— 被当真密码填进输入框，密码本身就不合法，
+    于是 `mismatch` / `empty-confirm` 两条**每次都红**（期望 (False,True) 实得 (True,True)）。
+
+    `verify` / `needs` / `notes` 是散文，允许出现 `<节点名>` 这类说明性尖括号，**不查**。
+    """
+    import re
+
+    pat = re.compile(r"<[^<>]{1,20}>")
+    bad: list[str] = []
+    for c in _load_doc()["cases"]:
+        cid = c.get("id")
+        vals: list[object] = []
+        for key in ("expect", "expect_absent", "group"):
+            v = c.get(key)
+            if isinstance(v, list):
+                vals += v
+        for p in c.get("params") or []:
+            vals += [v for k, v in p.items() if k != "name"]
+        for v in vals:
+            if isinstance(v, str) and pat.search(v):
+                bad.append(f"{cid}: {v!r}")
+    assert not bad, (
+        "这些用例的**参数值/期望值**里留了 `<...>` 占位符 —— YAML 没有变量替换，"
+        "它就是字面量，会永远红：\n  " + "\n  ".join(bad)
+    )
+
+
+def test_register_valid_password_matches_the_case_file():
+    """`test_p1_register.py` 的 `VALID_PASSWORD` 与 `cases.yaml` 里用的是**同一个值**。
+
+    为什么要有这条：那个值现在同时出现在两处（测试文件的常量、用例文件的参数），
+    这是**两个真源**。不禁止，但**必须一致** —— 改一处忘另一处就会像 10-13 那样永远红。
+    用 AST 读常量，不 import 测试模块（那会把 pywinauto 拉进来）。
+    """
+    import ast
+
+    src = (REPO_ROOT / "tests" / "launch" / "test_p1_register.py").read_text(encoding="utf-8")
+    const = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "VALID_PASSWORD":
+                    const = getattr(node.value, "value", None)
+    assert const, "没在 test_p1_register.py 里找到 VALID_PASSWORD 常量（守卫前提没了）"
+
+    # 判据用**语义**，不是"集合里包含"：`expect_tips[0] is False` 意思是
+    # 「期望密码提示不红」，那这条参数的 password 就**必须**是合法密码。
+    # （第一版写成 `const in used` 太松：只改其中一条参数时另一条还留着正确值，
+    #   集合仍然包含 —— 负路径注入当场验出来了。）
+    checked = 0
+    bad: list[str] = []
+    for c in _load_doc()["cases"]:
+        for p in c.get("params") or []:
+            tips = p.get("expect_tips") or []
+            if tips and tips[0] is False:
+                checked += 1
+                if p.get("password") != const:
+                    bad.append(
+                        f"{c.get('id')} 的参数 {p.get('name')!r} 期望密码提示不红，"
+                        f"但 password={p.get('password')!r} != VALID_PASSWORD({const!r})"
+                    )
+    assert checked >= 2, f"只找到 {checked} 条「期望密码提示不红」的参数 —— 守卫前提没了，先看用例文件"
+    assert not bad, "密码两处漂了：\n  " + "\n  ".join(bad)
