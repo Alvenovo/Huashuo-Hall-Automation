@@ -72,18 +72,24 @@ $env:HALL_CASES_FILE = "D:\跑批\用例\文件A.yaml"
   suite: login
   tier: data
   driver: controls_present      # 模板名
-  page: register                # 哪个页面
+  page: register                # 哪个页面 —— 靠它自动挂到通用用例函数上
   expect: [phone, code, send_code, password, confirm, agree, submit]
-  ref: tests/launch/test_p1_register.py::test_register_controls_present
+  # ⚠️ 不用写 ref！driver + page 就够了
 ```
 
-测试函数缩成一行：
+**不用写 Python。** 只要 `page` 已登记，脚本就自动把它挂到那个页面的
+「通用用例函数」上（登记在 `hall_auto/drivers.py` 的 `PAGE_TEST_FUNCS`）：
 
 ```python
+# tests/launch/test_p1_register.py —— 这个函数是通用的，承接该页面所有用例
 @pytest.mark.login
-def test_register_controls_present(register_pid, case):
+def test_cases_register(register_pid, case):
     drivers.run(case["driver"], case["page"], register_pid, case)
 ```
+
+⚠️ 通用函数**必须和它那个页面的 fixture 在同一个文件里** ——
+`register_pid` / `session` / `ready_pid` 都是模块级 fixture，跨文件拿不到。
+（守卫 `test_page_bound_funcs_live_next_to_their_fixture` 钉着这条。）
 
 **改期望控件、加一条同页控件图用例 = 只改 YAML。**
 模板还支持 `expect_absent`（不该出现的控件）与 `expect_exact`（集合必须相等）。
