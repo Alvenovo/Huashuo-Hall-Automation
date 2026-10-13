@@ -10,7 +10,12 @@
 
 ## 默认值为什么要锁
 
-2026-09-22 把默认从 `all` 改成 `failure-only`（跑批产物太多：`reports/` 下已堆了 3.8 万张 PNG）。
+**当前默认是 `all`**（`tests/conftest.py` 的 `--evidence`）。
+
+历史别记错：2026-09-22 曾把默认改成 `failure-only`（跑批产物太多：`reports/` 下已堆了 3.8 万张 PNG），
+**2026-09-23 又改回 `all`** —— 因为查下来「成功也留证」有真实依赖（见下）。
+**所以手册里写的「默认 all」是对的**，别再按"默认只留失败"理解。
+
 改默认之前必须先确认**没人在依赖"成功也留证"**，查下来只有一处关键依赖：
 
 - `farm_control.aggregate` 读的是 `summary.json`，**不是** per-case 的 `result.json`；
@@ -450,3 +455,64 @@ def test_report_puts_cases_with_screenshots_first(tmp_path, fake_capture):
     pos_noimg = html_text.index('data-img="0"')
     assert pos_img < pos_noimg, "有截图的行要默认排在无截图的行前面，省得人工翻页"
     assert "r.dataset.img==='1'" in html_text, "筛选逻辑要按 data-img 过滤，别只看结果状态"
+
+
+# ---------------------------------------------------------------------------
+# 证据清理：两种目录名都要认（2026-10-13 修）
+# ---------------------------------------------------------------------------
+
+
+def test_run_time_parses_both_dir_name_formats():
+    """轮次目录名有两种格式，**都要能取到时间**。
+
+    早期是 `2026-09-17_1052`；多机之后是 `<节点>_2026-10-13_1405`（同秒撞了再加 `_2`）。
+    原来的实现用 `name.split("_")[:2]` 拼日期 —— 对带节点前缀的格式抛 ValueError
+    被 `continue` 吃掉，于是**那些目录永远不被清理**。
+    2026-10-13 实测：本机 1140 个轮次目录里 1124 个（98.6%）属于这种，证据无限累积。
+    """
+    from datetime import datetime
+
+    assert ev._run_time("2026-09-17_1052") == datetime(2026, 9, 17, 10, 52)
+    assert ev._run_time("LAPTOP-VS5F7HF4_2026-10-13_1405") == datetime(2026, 10, 13, 14, 5)
+    assert ev._run_time("LAPTOP-VS5F7HF4_2026-10-13_1405_2") == datetime(2026, 10, 13, 14, 5)
+
+
+def test_run_time_returns_none_for_unparseable_names():
+    """取不到时间就返回 None —— 调用方**不删**（不猜、不误删）。"""
+    assert ev._run_time("汇总") is None
+    assert ev._run_time("report") is None
+    assert ev._run_time("") is None
+
+
+def test_prune_removes_node_prefixed_dirs_too(tmp_path, monkeypatch):
+    """**核心回归**：带节点前缀的旧轮次也必须被清掉（这是修的那个 bug）。"""
+    from datetime import datetime, timedelta
+
+    root = tmp_path / "evidence"
+    root.mkdir()
+    old = datetime.now() - timedelta(days=40)
+    fresh = datetime.now() - timedelta(days=1)
+    old_dir = root / f"LAPTOP-x_{old.strftime('%Y-%m-%d_%H%M')}"
+    fresh_dir = root / f"LAPTOP-x_{fresh.strftime('%Y-%m-%d_%H%M')}"
+    old_dir.mkdir()
+    fresh_dir.mkdir()
+    (old_dir / "final.png").write_bytes(b"x")
+    (fresh_dir / "final.png").write_bytes(b"x")
+
+    removed = ev.prune_old_runs(root, keep_days=30)
+
+    assert old_dir in removed, "带节点前缀的过期轮次没被清 —— 就是这次修的 bug"
+    assert not old_dir.exists()
+    assert fresh_dir.exists(), "30 天内的不能删"
+
+
+def test_prune_never_touches_unparseable_dirs(tmp_path):
+    """名字里没有时间的目录**不许删** —— 宁可留着，也别误删汇总之类的东西。"""
+    root = tmp_path / "evidence"
+    root.mkdir()
+    keep = root / "汇总"
+    keep.mkdir()
+    (keep / "x.html").write_text("x", encoding="utf-8")
+
+    assert ev.prune_old_runs(root, keep_days=1) == []
+    assert keep.exists()

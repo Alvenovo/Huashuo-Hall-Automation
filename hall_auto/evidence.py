@@ -178,6 +178,28 @@ class EvidenceSession:
         return report
 
 
+# 轮次目录名有**两种**格式：
+#   早期    `2026-09-17_1052`
+#   多机之后 `<节点>_2026-10-13_1405`（同秒撞了再加 `_2`）
+# 所以**不能用 `name.split("_")[:2]`** —— 对带节点前缀的格式它拼出
+# `LAPTOP-x_2026`，`strptime` 抛 ValueError → 被 `continue` 吃掉 → **永远不清**。
+# 2026-10-13 实测：本机 1140 个轮次目录里 **1124 个解析不了（98.6%）**，
+# 「保留 30 天」形同虚设，证据会无限累积（已积到 49520 张 final.png）。
+# 改成在名字里**搜**日期时间，两种格式都认。
+_RUN_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{4})")
+
+
+def _run_time(name: str) -> datetime | None:
+    """从轮次目录名里取时间；取不到返回 None（**不删**，不猜）。"""
+    m = _RUN_STAMP.search(name)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(f"{m.group(1)}_{m.group(2)}", "%Y-%m-%d_%H%M")
+    except ValueError:
+        return None
+
+
 def prune_old_runs(root: Path = EVIDENCE_ROOT, keep_days: int = 30) -> list[Path]:
     if keep_days <= 0 or not root.exists():
         return []
@@ -186,13 +208,11 @@ def prune_old_runs(root: Path = EVIDENCE_ROOT, keep_days: int = 30) -> list[Path
     for d in sorted(root.iterdir()):
         if not d.is_dir():
             continue
-        try:
-            day = datetime.strptime(d.name.split("_")[0] + "_" + d.name.split("_")[1], "%Y-%m-%d_%H%M")
-        except (ValueError, IndexError):
+        day = _run_time(d.name)
+        if day is None or day >= cutoff:
             continue
-        if day < cutoff:
-            shutil.rmtree(d, ignore_errors=True)
-            removed.append(d)
+        shutil.rmtree(d, ignore_errors=True)
+        removed.append(d)
     return removed
 
 
