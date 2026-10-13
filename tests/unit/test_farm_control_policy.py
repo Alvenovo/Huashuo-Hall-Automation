@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -476,3 +477,87 @@ def test_aggregate_lists_the_suite_for_every_run(farm):
     line = _line_of(html, "R01_2026-09-29_1352", require="report.html")
     assert "<td>unit</td>" in line, "轮次那一行要写出套件"
     assert "results/R01/R01_2026-09-29_1352/report.html" in html, "轮次名要能点进该轮报告"
+
+
+# ---------------- done/ 清理（2026-10-13） ----------------
+
+# `done/` 不只是「已完成」的展示 —— 它还是**凭据状态的兜底来源**
+# （`_node_creds_from_receipts`：证据目录里没有 `node_env.json` 的老节点靠读它）。
+# 2026-10-13 用户看到 `status` 报「已完成 48 个」问怎么清；实查那 48 份全是同一个节点、
+# 跨 09-29~10-10，而兜底函数**按 mtime 只取最新一份** → 老的永远读不到。
+# 所以：**每个节点留最新 N 份**，别删光。
+
+
+def _put_done(farm: Path, node: str, name: str, *, creds: dict | None = None,
+              mtime: float | None = None) -> Path:
+    path = farm / "done" / name
+    path.write_text(json.dumps({
+        "node": node, "task_id": name, "ok": True,
+        "credentials": creds if creds is not None else {"password_login": True},
+    }, ensure_ascii=False), encoding="utf-8")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_prune_keeps_newest_n_per_node(farm):
+    """每个节点只留最新 N 份，老的删掉。"""
+    for i in range(6):
+        _put_done(farm, "R01", f"R01_t{i}.json", mtime=1_700_000_000 + i)
+    removed = farm_control.prune_done(farm, keep_per_node=3)
+    left = sorted(p.name for p in (farm / "done").glob("*.json"))
+    assert len(removed) == 3
+    assert left == ["R01_t3.json", "R01_t4.json", "R01_t5.json"], f"留的不是最新 3 份：{left}"
+
+
+def test_prune_is_per_node_not_global(farm):
+    """**按节点各自保留** —— 不能全局取前 N，否则某个节点会被清空、凭据列变 ✗。"""
+    for i in range(4):
+        _put_done(farm, "R01", f"R01_t{i}.json", mtime=1_700_000_000 + i)
+    for i in range(2):
+        _put_done(farm, "R02", f"R02_t{i}.json", mtime=1_700_000_000 + i)
+    farm_control.prune_done(farm, keep_per_node=3)
+    left = sorted(p.name for p in (farm / "done").glob("*.json"))
+    assert "R02_t0.json" in left and "R02_t1.json" in left, "R02 只有 2 份，一份都不该删"
+    assert len(left) == 5, f"应为 3(R01) + 2(R02) = 5，实际 {left}"
+
+
+def test_prune_keeps_the_credentials_source_alive(farm):
+    """**核心不变量**：清完之后 `_node_creds_from_receipts` 仍能取到每个节点的凭据。
+
+    这就是「不能全删」的原因 —— `done/` 是凭据状态的兜底来源，
+    删光了老节点的「凭据」列会全变 ✗（2026-10-12 修过的坑：
+    一线会拿着全红的凭据列去反复折腾 `farm_node.env`）。
+    """
+    for i in range(8):
+        _put_done(farm, "R01", f"R01_t{i}.json", creds={"password_login": True},
+                  mtime=1_700_000_000 + i)
+    _put_done(farm, "R02", "R02_only.json", creds={"microsoft_sso": True},
+              mtime=1_700_000_000)
+
+    farm_control.prune_done(farm, keep_per_node=3)
+
+    creds = farm_control._node_creds_from_receipts(farm)
+    assert creds.get("R01"), "R01 的凭据取不到了 —— 清理把凭据来源删没了"
+    assert creds.get("R02"), "R02 只有一份，绝不能被删"
+
+
+def test_prune_refuses_to_wipe_everything(farm):
+    """`keep_per_node<=0` 直接不删 —— 防手滑传 0 把凭据来源清空。"""
+    for i in range(4):
+        _put_done(farm, "R01", f"R01_t{i}.json", mtime=1_700_000_000 + i)
+    assert farm_control.prune_done(farm, keep_per_node=0) == []
+    assert len(list((farm / "done").glob("*.json"))) == 4
+
+
+def test_prune_tolerates_broken_receipts(farm):
+    """读不了的 json 归到「无名」组，**也要按最新保留**，不能因为解析失败就删掉。"""
+    (farm / "done" / "broken.json").write_text("{ 这不是 json", encoding="utf-8")
+    _put_done(farm, "R01", "R01_t0.json", mtime=1_700_000_000)
+    removed = farm_control.prune_done(farm, keep_per_node=3)
+    assert removed == []
+    assert (farm / "done" / "broken.json").exists(), "解析失败的回执不该被删"
+
+
+def test_prune_on_missing_dir_is_noop(tmp_path):
+    assert farm_control.prune_done(tmp_path, keep_per_node=3) == []

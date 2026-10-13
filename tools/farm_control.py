@@ -274,6 +274,50 @@ def _node_creds_from_receipts(root: Path) -> dict[str, dict]:
     return out
 
 
+def prune_done(root: Path, keep_per_node: int = 3) -> list[Path]:
+    """`done/` 回执清理：**每个节点只留最新的 N 份**，返回删掉的文件。
+
+    ## 为什么不能全删
+
+    `done/` 不只是「已完成」的展示 —— 它还是**凭据状态的兜底来源**
+    （`_node_creds_from_receipts`：证据目录里没有 `node_env.json` 的老节点靠读它）。
+    **删光会让那些节点的「凭据」列全变 ✗** —— 正是 2026-10-12 修掉的那个坑：
+    一线会拿着全红的凭据列去反复折腾 `farm_node.env`。
+
+    ## 为什么可以删老的
+
+    那个兜底函数**按 mtime 取每个节点最新的一份**，更老的永远读不到。
+    2026-10-13 实查：共享盘上 48 份回执全是同一个节点、跨 09-29~10-10，
+    其中 45 份属于"永远读不到"的那类。
+
+    ## 为什么留 N 份而不是 1 份
+
+    多留两份是给排障用的（"这台机器上一次、上上一次是什么时候跑的、什么结果"）。
+    留 3 份的代价可以忽略，删到只剩 1 份就没历史可看了。
+    """
+    if keep_per_node <= 0:
+        return []
+    done_dir = root / "done"
+    if not done_dir.is_dir():
+        return []
+    by_node: dict[str, list[Path]] = {}
+    for path in done_dir.glob("*.json"):
+        data = _read_json(path)
+        node = str(data.get("node") or "") or "（无名）"
+        by_node.setdefault(node, []).append(path)
+
+    removed: list[Path] = []
+    for paths in by_node.values():
+        paths.sort(key=lambda p: p.stat().st_mtime)
+        for old in paths[:-keep_per_node]:
+            try:
+                old.unlink()
+                removed.append(old)
+            except OSError:
+                pass
+    return removed
+
+
 def _suite_of(run_dir: Path, summary: dict) -> str:
     """这一轮跑的是什么套件 —— **目录名里没有，只能从证据里读**。
 
@@ -382,6 +426,17 @@ def cmd_index(args) -> int:
     return 0
 
 
+def cmd_prune(args) -> int:
+    """手动清 `done/` 的老回执（`aggregate` 收尾时也会自动跑一次）。"""
+    root = farm_root()
+    removed = prune_done(root)
+    if removed:
+        print(f"[清理] done/ 删掉 {len(removed)} 份老回执（每节点保留最新 3 份）")
+    else:
+        print("[清理] done/ 没有需要清理的老回执")
+    return 0
+
+
 def cmd_aggregate(args) -> int:
     root = farm_root()
     nodes_data = _collect_nodes_data(root)
@@ -431,6 +486,11 @@ def cmd_aggregate(args) -> int:
     no_creds = sorted(n for n, v in nodes_data.items() if not (v.get("credentials") or {}))
     if no_creds:
         print(f"⚠ 这些节点没拿到凭据状态（报告里凭据列会全 ✗，别据此判断用例是否真跑）：{', '.join(no_creds)}")
+    # 顺手清 done/ 的老回执（每节点留最新 3 份）。放这儿是因为 aggregate 就是"跑完收尾"那一步，
+    # 跟 evidence 的 prune_old_runs 一个时机。**别删光** —— 见 prune_done 的说明。
+    pruned = prune_done(root)
+    if pruned:
+        print(f"[清理] done/ 删掉 {len(pruned)} 份老回执（每节点保留最新 3 份）")
     return 0
 
 
@@ -760,6 +820,8 @@ def main() -> int:
     p_status = sub.add_parser("status", help="看任务进度")
     p_status.set_defaults(func=cmd_status)
 
+    p_prune = sub.add_parser("prune", help="清理 done/ 的老回执（每节点保留最新 3 份）")
+    p_prune.set_defaults(func=cmd_prune)
     p_agg = sub.add_parser("aggregate", help="汇总成节点×用例矩阵")
     p_agg.set_defaults(func=cmd_aggregate)
 
