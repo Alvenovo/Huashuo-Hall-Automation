@@ -221,7 +221,10 @@ def get_suite(name: str) -> Suite:
 # 「跑着跑着停了」—— 节点跑完手上的活就回轮询，看起来像卡死，实际是没人投。
 # 全量档把「这次要跑什么」从人的记忆里拿出来，一条命令投完。
 #
-# 唯一不含的是 `login-manual`：人在环，`farm_safe=False`，永不进无人值守农场。
+# 不含两个：`login-manual`（人在环，`farm_safe=False`，永不进无人值守农场）、
+# `probe`（只读诊断探针，按需单投，不进每轮全量）。
+# 权威名单在 tests/unit/test_suite_planning.py 的 `FULL_RUN_EXCLUDED`，
+# 那里有守卫：farm_safe 的套件必须「在全量档」或「在排除名单」，不许悬着。
 #
 # ⚠️ **顺序有意义，不是随便排的**：`install` 会**卸载并重装大厅本体**，
 # 跑完之后登录态、主题档位全部重置 —— 所以它必须排在最后。
