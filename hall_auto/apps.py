@@ -19,7 +19,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
-from hall_auto.config import Config
+from hall_auto.config import Config, load_config
 from hall_auto.launch import LaunchError, _press_button, click_home_tab, popup_text
 from hall_auto.product import _running_image_names, is_admin, stop_images
 from hall_auto.search import open_detail_until_ready, search_hits
@@ -458,7 +458,8 @@ def pick_wizard_label(names: Iterable[str]) -> str | None:
     return None
 
 
-def pick_wizard_button(buttons: Iterable[WizardButton], drawn_ok: bool = True) -> WizardButton | None:
+def pick_wizard_button(buttons: Iterable[WizardButton], drawn_ok: bool = True,
+                       min_area: int = CTA_MIN_AREA) -> WizardButton | None:
     """挑该点的那个按钮，认不出就返回 None（宁可不点，绝不点错）。
 
     顺序：可见且文字命中白名单 → 唯一一块可见的自绘主按钮 → 隐藏但文字命中白名单。
@@ -474,7 +475,7 @@ def pick_wizard_button(buttons: Iterable[WizardButton], drawn_ok: bool = True) -
     label = pick_wizard_label(button_label(b.text) for b in labelled)
     if label:
         return next(b for b in labelled if button_label(b.text) == label)
-    drawn = [b for b in usable if b.visible and not b.text and b.area >= CTA_MIN_AREA]
+    drawn = [b for b in usable if b.visible and not b.text and b.area >= min_area]
     if drawn_ok and len(drawn) == 1:
         return drawn[0]
     hidden = [b for b in usable if not b.visible and b.text]
@@ -511,7 +512,8 @@ def drive_vendor_installer(app_name: str = "", drawn_ok: bool = True) -> list[st
     """
     clicked: list[str] = []
     for hwnd in installer_dialogs(app_name):
-        target = pick_wizard_button(wizard_buttons(hwnd), drawn_ok=drawn_ok)
+        target = pick_wizard_button(wizard_buttons(hwnd), drawn_ok=drawn_ok,
+                                    min_area=cta_min_area(app_name))
         if target is None:
             continue
         before = _button_signature(hwnd)
@@ -623,13 +625,72 @@ def dump_wizard_windows(app_name: str = "", path: Path = WIZARD_DUMP, append: bo
 # 「不能打开要写入的文件」模态框等人工 —— 无人值守直接干等到超时
 # （2026-09-29 新测试机真踩）。装之前必须先把应用进程收干净。
 # 键是配置里的夹具名（子串互认），值是进程映像名（不带 .exe）。
+# ⚠️ **别往这里加新 app** —— 新 app 的参数请写进 `config.yaml` 的 `fixture_profiles`。
+# 这里只是**兜底**：配置读不到（或那台机器还是旧配置）时，至少别把现有夹具搞坏。
 FIXTURE_PROC_HINTS: dict[str, tuple[str, ...]] = {
     "网易云音乐": ("cloudmusic",),
 }
 
+_PROFILES_CACHE: dict[str, dict] | None = None
+
+
+def _profiles() -> dict[str, dict]:
+    """`config.yaml` 的 `fixture_profiles`。读不到就返回空 dict（走内置兜底），**不抛**。
+
+    懒加载 + 进程内缓存：向导驱动是热点路径，不想每次点按钮都去读两个 YAML。
+    """
+    global _PROFILES_CACHE
+    if _PROFILES_CACHE is None:
+        try:
+            _PROFILES_CACHE = dict(load_config().fixture_profiles or {})
+        except Exception:
+            _PROFILES_CACHE = {}
+    return _PROFILES_CACHE
+
+
+def profile_for(app_name: str) -> dict:
+    """按 app 名（子串互认）取一条 profile；没有就返回 `{}`（不猜）。"""
+    if not app_name:
+        return {}
+    for key, prof in _profiles().items():
+        if key and (key in app_name or app_name in key):
+            return dict(prof or {})
+    return {}
+
+
+def cta_min_area(app_name: str = "") -> int:
+    """自绘主按钮的面积门槛：**配置优先**，没配就用模块默认 `CTA_MIN_AREA`。
+
+    ⚠️ **只允许往低调，调高会被拒绝并退回默认值。**
+
+    为什么：`pick_wizard_button` 的兜底链是
+    「文字白名单 → **唯一一块无文字可见按钮** → 隐藏但文字命中白名单」。
+    门槛调高会让自绘主按钮**过不了第一道**，于是退到第三道 ——
+    那里会点到「关闭(&L)」，**等于把安装器关掉**，比「认不出、不点」糟得多
+    （2026-10-13 写守卫时用 30000 门槛实测出它返回的就是「关闭(&L)」）。
+    真遇到「新 app 的主按钮比网易云还大」，要连兜底链一起改 —— 那是代码改动，不是配置。
+    """
+    raw = profile_for(app_name).get("cta_min_area")
+    if not raw:
+        return CTA_MIN_AREA
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return CTA_MIN_AREA
+    if value > CTA_MIN_AREA:
+        return CTA_MIN_AREA
+    return max(1, value)
+
 
 def fixture_proc_hints(app_name: str) -> tuple[str, ...]:
-    """这个夹具应用跑起来时的进程映像名；没登记过的返回空（不猜、不误杀）。"""
+    """这个夹具应用跑起来时的进程映像名。
+
+    顺序：**`config.yaml` 的 `fixture_profiles` → 内置兜底表 → 空**。
+    都没登记就返回空 —— **不猜、不误杀**（猜错会杀掉别人的进程）。
+    """
+    configured = profile_for(app_name).get("process_names")
+    if configured:
+        return tuple(str(x) for x in configured)
     for key, hints in FIXTURE_PROC_HINTS.items():
         if key and app_name and (key in app_name or app_name in key):
             return hints

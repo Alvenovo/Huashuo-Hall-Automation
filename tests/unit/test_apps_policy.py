@@ -441,3 +441,126 @@ def test_update_fixture_still_fails_when_button_found_but_unclickable(monkeypatc
     monkeypatch.setattr(mod, "_press_button", lambda button: False)
     with pytest.raises(AssertionError):
         mod.test_update_fixture_via_hall(_update_fixture_stub(), object())
+
+
+# ---------------------------------------------------------------------------
+# app profile 外置（2026-10-13）：换夹具应用只改 config.yaml，不动代码
+#
+# 背景：`apps.py` 里原来写死了「网易云」的进程名与自绘按钮面积门槛。换 app 时
+# 那些假设会**静默失效** —— 典型后果是装之前没收进程，撞 NSIS「不能打开要写入的文件」
+# 模态框干等到超时（2026-09-29 真踩）。现在摊到 `config.yaml` 的 `fixture_profiles`。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_profiles(monkeypatch):
+    """替换进程内缓存的 profile 表（不碰真配置文件）。"""
+
+    def _install(mapping: dict):
+        monkeypatch.setattr(apps, "_PROFILES_CACHE", dict(mapping))
+
+    return _install
+
+
+@pytest.mark.unit
+def test_profile_matches_by_substring():
+    """商店条目常带后缀（「网易云音乐官方版」），所以按子串互认。"""
+    apps._PROFILES_CACHE = {"网易云音乐": {"cta_min_area": 12000}}
+    assert apps.profile_for("网易云音乐官方版")["cta_min_area"] == 12000
+
+
+@pytest.mark.unit
+def test_profile_unknown_app_is_empty():
+    """没登记的 app 返回空 dict —— **不猜**。"""
+    apps._PROFILES_CACHE = {"网易云音乐": {"cta_min_area": 12000}}
+    assert apps.profile_for("QQ音乐") == {}
+    assert apps.profile_for("") == {}
+
+
+@pytest.mark.unit
+def test_cta_min_area_prefers_profile_then_default(fake_profiles):
+    """面积门槛：**配置优先**，没配就退回模块默认（现有行为不变）。"""
+    fake_profiles({"QQ音乐": {"cta_min_area": 5000}})
+    assert apps.cta_min_area("QQ音乐") == 5000
+    assert apps.cta_min_area("没登记过的app") == apps.CTA_MIN_AREA
+
+
+@pytest.mark.unit
+def test_cta_min_area_tolerates_garbage(fake_profiles):
+    """配置写错（写了字符串/None）时退回默认，别把向导驱动整个搞崩。"""
+    fake_profiles({"坏配置": {"cta_min_area": "不是数字"}, "空配置": {"cta_min_area": None}})
+    assert apps.cta_min_area("坏配置") == apps.CTA_MIN_AREA
+    assert apps.cta_min_area("空配置") == apps.CTA_MIN_AREA
+
+
+@pytest.mark.unit
+def test_proc_hints_prefers_profile_over_builtin(fake_profiles):
+    """**关键**：profile 里配了就用它 —— 这条就是「换 app 只改配置」的实现。"""
+    fake_profiles({"网易云音乐": {"process_names": ["something-else"]}})
+    assert apps.fixture_proc_hints("网易云音乐") == ("something-else",)
+
+
+@pytest.mark.unit
+def test_proc_hints_falls_back_to_builtin_table(fake_profiles):
+    """配置里没有 → 退回内置兜底表（老配置的机器照旧能跑）。"""
+    fake_profiles({})
+    assert apps.fixture_proc_hints("网易云音乐") == ("cloudmusic",)
+
+
+@pytest.mark.unit
+def test_proc_hints_unknown_app_is_empty(fake_profiles):
+    """都没登记就返回空 —— **不猜、不误杀**（猜错会杀掉别人的进程）。"""
+    fake_profiles({})
+    assert apps.fixture_proc_hints("没登记过的app") == ()
+
+
+@pytest.mark.unit
+def test_profiles_never_raise_when_config_is_broken(monkeypatch):
+    """读配置失败不能把向导驱动搞崩 —— 退回内置兜底，打印不了就沉默。"""
+    monkeypatch.setattr(apps, "_PROFILES_CACHE", None)
+
+    def _boom():
+        raise RuntimeError("配置炸了")
+
+    monkeypatch.setattr(apps, "load_config", _boom)
+    assert apps._profiles() == {}
+    assert apps.fixture_proc_hints("网易云音乐") == ("cloudmusic",)
+
+
+@pytest.mark.unit
+def test_pick_wizard_button_honours_min_area():
+    """`min_area` 可传：门槛调低能多认出按钮；调高会**跳过**自绘主按钮。"""
+    assert apps.pick_wizard_button(NETEASE_PAGE1, min_area=12000) is not None
+    assert apps.pick_wizard_button(NETEASE_PAGE1, min_area=5000) is not None
+
+
+@pytest.mark.unit
+def test_raising_min_area_falls_back_to_the_close_button():
+    """**这就是 `cta_min_area` 只允许调低的原因**（2026-10-13 实测出来的）。
+
+    门槛调到 30000 之后，网易云那块 360x60=21600 的自绘主按钮过不了第一道，
+    函数退到兜底链第三道「隐藏但文字命中白名单」—— 于是返回**「关闭(&L)」**。
+    真按它点下去就是把安装器关掉，**比「认不出、不点」糟得多**。
+
+    所以 `cta_min_area()` 对「调高」做了拒绝（退回默认）。这条守卫钉住那个决定：
+    哪天兜底链改了、调高不再退到「关闭」，这条会红，提醒你回去重新评估那个保护。
+    """
+    picked = apps.pick_wizard_button(NETEASE_PAGE1, min_area=30000)
+    assert picked is not None and picked.text == "关闭(&L)"
+
+
+@pytest.mark.unit
+def test_cta_min_area_refuses_to_go_higher_than_default(fake_profiles):
+    """配置里把门槛调高 → 拒绝，退回默认（调高会让兜底链点到「关闭」）。"""
+    fake_profiles({"想调高的app": {"cta_min_area": 30000}})
+    assert apps.cta_min_area("想调高的app") == apps.CTA_MIN_AREA
+    fake_profiles({"想调低的app": {"cta_min_area": 5000}})
+    assert apps.cta_min_area("想调低的app") == 5000
+
+
+@pytest.mark.unit
+def test_pick_wizard_button_default_min_area_unchanged():
+    """不传 `min_area` 时行为与改动前一致（默认 `CTA_MIN_AREA`）。"""
+    assert apps.pick_wizard_button(NETEASE_PAGE1) is apps.pick_wizard_button(
+        NETEASE_PAGE1, min_area=apps.CTA_MIN_AREA
+    )

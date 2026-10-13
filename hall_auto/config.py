@@ -128,6 +128,9 @@ class Config:
     launch: LaunchSettings
     fixture_apps: FixtureApps
     update_fixture: UpdateFixture
+    # 每个 app「怎么认」的参数（进程名 / 自绘按钮面积门槛），见 config.yaml 的注释。
+    # 换夹具应用时只改配置，不用动 hall_auto/apps.py。
+    fixture_profiles: dict[str, dict]
     security: SecuritySettings
     node_id: str
     # 多机跑批的任务中转站（共享盘上的农场目录，含 tasks/ done/ results/ logs/）。
@@ -257,6 +260,7 @@ def load_config(path: Path | None = None) -> Config:
     fixture_raw = data.get("fixture_apps") or {}
     update_raw = data.get("update_fixture") or {}
     security_raw = data.get("security") or {}
+    profiles_raw = data.get("fixture_profiles") or {}
 
     def _tuple(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
         value = launch_raw.get(key)
@@ -295,6 +299,7 @@ def load_config(path: Path | None = None) -> Config:
             ),
             accept_buttons=_tuple("accept_buttons", ("同意", "确定", "允许", "是")),
         ),
+        fixture_profiles={str(k): dict(v or {}) for k, v in profiles_raw.items()},
         fixture_apps=FixtureApps(
             install=str(fixture_raw.get("install") or ""),
             update=str(fixture_raw.get("update") or ""),
