@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -9,15 +11,16 @@ from hall_auto.awake import keep_awake_for_process, session_lost, session_lost_d
 from hall_auto.config import load_config
 from hall_auto.dpi import is_interactive_session, machine_profile, node_id
 from hall_auto.evidence import (
+    EvidenceSession,
     MODE_ALL,
     MODE_FAILURE,
     OUTCOME_ERROR,
     OUTCOME_FAILED,
     OUTCOME_PASSED,
     OUTCOME_SKIPPED,
-    EvidenceSession,
     new_run_dir,
     prune_old_runs,
+    write_local_index,
 )
 
 
@@ -30,11 +33,13 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         "--evidence",
-        choices=[MODE_ALL, MODE_FAILURE],
+        choices=[MODE_ALL, MODE_FAILURE, "off"],
         default=MODE_ALL,
         help=(
             "证据采集策略：all=成功失败都留证（**默认**，2026-09-23 改）；"
-            "failure-only=只留失败（跑批产物少很多，盘紧张时用）。"
+            "failure-only=只留失败（跑批产物少很多，盘紧张时用）；"
+            "off=**完全不留**（本地反复跑开发时用 —— 不然每跑一次就在 "
+            "reports/evidence/ 下多一个轮次目录，很快堆成一片）。"
         ),
     )
     parser.addoption(
@@ -264,9 +269,17 @@ def _wants_screenshot(item) -> bool:
 
 
 def pytest_configure(config):
-    config._evidence = EvidenceSession(new_run_dir(), config.getoption("--evidence"))
+    mode = config.getoption("--evidence")
+    if mode == "off":
+        # 本地反复跑开发用：**不往 reports/evidence/ 建轮次目录**（建了就是一片噪声）。
+        # 仍旧给一个专属临时目录，免得 login.py 的 toast 截图找不到落点而报错。
+        run_dir = Path(tempfile.mkdtemp(prefix="hall-evidence-off-"))
+    else:
+        run_dir = new_run_dir()
+    config._evidence = EvidenceSession(run_dir, MODE_ALL if mode == "off" else mode)
+    config._evidence_off = mode == "off"
     # login.py 的提交后 toast 截图靠这个变量找证据目录（农场会把整个目录回传共享盘）
-    os.environ["HALL_EVIDENCE_RUN_DIR"] = str(config._evidence.run_dir)
+    os.environ["HALL_EVIDENCE_RUN_DIR"] = str(run_dir)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -307,11 +320,18 @@ def pytest_runtest_makereport(item, call):
 
 def pytest_sessionfinish(session, exitstatus):
     ev: EvidenceSession = session.config._evidence
+    if getattr(session.config, "_evidence_off", False):
+        shutil.rmtree(ev.run_dir, ignore_errors=True)
+        return
     if not ev.records:
         shutil.rmtree(ev.run_dir, ignore_errors=True)
         return
     report_path = ev.finish()
     removed = prune_old_runs(keep_days=session.config.getoption("--evidence-keep-days"))
     print(f"\n[证据] 汇总报告: {report_path}")
+    # 本地索引：一轮一行，能直接看出跑了什么、模块在哪个子目录（2026-10-13 加）
+    index = write_local_index()
+    if index is not None:
+        print(f"[证据] 本地索引: {index}（每轮一行，看不出哪轮跑了什么时看它）")
     for d in removed:
         print(f"[证据] 已清理过期 run: {d.name}")

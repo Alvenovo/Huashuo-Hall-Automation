@@ -601,3 +601,99 @@ def test_record_puts_the_label_in_the_path(tmp_path):
         "用例目录没叫「编号_标题」—— 命名改了但 record 没用上"
     )
     assert rec.screenshot is None or "P0-06_搜索命中" in rec.screenshot
+
+
+# ---------------------------------------------------------------------------
+# 本地索引页 + --evidence=off（2026-10-13）
+#
+# 用户实报：`reports/evidence/` 底下堆成一片 `LAPTOP-x_2026-10-13_1740_8`，
+# 「看不懂每个模块存在哪」。农场侧 10-12 就有 index.html，本地这份一直没有。
+# ---------------------------------------------------------------------------
+
+
+def _fake_run(root: Path, name: str, *, modules: list[str], passed: int = 1, failed: int = 0) -> None:
+    d = root / name
+    d.mkdir()
+    (d / "summary.json").write_text(json.dumps({
+        "run": name, "node": "N", "total": passed + failed, "passed": passed,
+        "failed": failed, "error": 0, "skipped": 0, "duration_s": 1.0,
+        "cases": [{"module": m, "case": "c", "nodeid": f"tests/{m}/x.py::test_c",
+                   "outcome": "passed", "duration_s": 0.1, "timestamp": "t",
+                   "assertion": None, "screenshot": None} for m in modules],
+    }, ensure_ascii=False), encoding="utf-8")
+    (d / "report.html").write_text("<html></html>", encoding="utf-8")
+    for m in modules:
+        (d / m / "P0-01_示例").mkdir(parents=True)
+
+
+def test_local_index_lists_every_run_with_suite_and_counts(tmp_path):
+    """索引页一轮一行，**带套件名和过红跳** —— 光看目录名看不出这些。"""
+    root = tmp_path / "evidence"
+    root.mkdir()
+    _fake_run(root, "N_2026-10-13_1000", modules=["launch"], passed=4)
+    _fake_run(root, "N_2026-10-13_1001", modules=["unit"], passed=8, failed=2)
+
+    out = ev.write_local_index(root)
+
+    assert out is not None and out.name == "index.html"
+    html = out.read_text(encoding="utf-8")
+    assert html.count("<tr><td><a href=") == 2, "每轮该有一行"
+    assert "launch" in html and "unit" in html, "要能看出跑了哪个套件"
+    assert "N_2026-10-13_1000/report.html" in html, "每轮要能点进它自己的报告"
+    assert "8" in html and "2" in html, "过/红要列出来"
+
+
+def test_local_index_says_where_module_evidence_lives(tmp_path):
+    """要写清「用例证据在 `<轮次>/<模块>/` 下」—— 用户原话是「看不懂每个模块存在哪」。"""
+    root = tmp_path / "evidence"
+    root.mkdir()
+    _fake_run(root, "N_2026-10-13_1000", modules=["launch"])
+
+    html = (ev.write_local_index(root)).read_text(encoding="utf-8")
+
+    assert "模块" in html
+    assert "&lt;轮次&gt;/&lt;模块&gt;/" in html, "要把路径写出来"
+    assert "launch" in html
+
+
+def test_local_index_skips_runs_without_summary(tmp_path):
+    """没 `summary.json` 的目录不进索引（半截的、手工建的都不该出现）。"""
+    root = tmp_path / "evidence"
+    root.mkdir()
+    (root / "乱七八糟").mkdir()
+    _fake_run(root, "N_2026-10-13_1000", modules=["launch"])
+
+    html = (ev.write_local_index(root)).read_text(encoding="utf-8")
+    assert "乱七八糟" not in html
+    assert html.count("<tr><td><a href=") == 1
+
+
+def test_local_index_returns_none_when_nothing_to_index(tmp_path):
+    """没有可索引的轮次就不写空索引（返回 None）。"""
+    root = tmp_path / "evidence"
+    root.mkdir()
+    assert ev.write_local_index(root) is None
+    assert not (root / "index.html").exists()
+
+
+def test_evidence_off_leaves_no_run_dir():
+    """**`--evidence=off` 必须一个轮次目录都不建**（本地反复跑开发时用）。
+
+    2026-10-13 用户实报 `reports/evidence/` 堆了 34 个看不出差别的目录 ——
+    全是他/我反复跑单测留下的，每跑一次建一个。
+    这条**跑真 pytest**（选项和 sessionfinish 的联动只有真跑才验得到）。
+    """
+    import subprocess
+    import sys
+
+    root = ev.EVIDENCE_ROOT
+    before = {p.name for p in root.iterdir() if p.is_dir()}
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8", "-m", "pytest",
+         "tests/unit/test_evidence_policy.py::test_run_time_returns_none_for_unparseable_names",
+         "-m", "unit", "-q", "--evidence=off"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    after = {p.name for p in root.iterdir() if p.is_dir()}
+    assert proc.returncode == 0, f"off 跑失败了：\n{proc.stdout[-800:]}"
+    assert after == before, f"`--evidence=off` 还是建了轮次目录：{sorted(after - before)}"

@@ -270,6 +270,93 @@ def _run_time(name: str) -> datetime | None:
         return None
 
 
+def _read_json(path: Path) -> dict:
+    """读一个 json；读不了就返回 {}（**索引页不能因为一个坏文件就整页不生成**）。"""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _suites_of_run(run_dir: Path, summary: dict) -> str:
+    """这一轮跑的是什么套件 —— **目录名里没有，只能从证据里读**。
+
+    优先 `node_env.json` 的 `suite`（`farm_agent` 写的，权威）；本地跑没有那个文件，
+    退化成 summary 里出现过的 module 名（`unit` / `launch` / `launch+login` …）。
+    """
+    env = _read_json(run_dir / "node_env.json") if (run_dir / "node_env.json").is_file() else {}
+    suite = str((env or {}).get("suite") or "").strip()
+    if suite:
+        return suite
+    mods = sorted({str(c.get("module") or "") for c in (summary.get("cases") or []) if c.get("module")})
+    return "+".join(mods) if mods else "?"
+
+
+def write_local_index(root: Path = EVIDENCE_ROOT) -> Path | None:
+    """给**本地**证据根生成 `index.html`：一轮一行，能直接看出跑了什么、模块在哪。
+
+    ## 为什么需要（2026-10-13 用户实报）
+
+    农场侧 2026-10-12 就有 `results/<节点>/index.html`（目录名 ↔ 套件 ↔ 结果），
+    **本地这份一直没有** —— 于是 `reports/evidence/` 底下堆成一片
+    `LAPTOP-x_2026-10-13_1740_8` 这种只有时间戳的目录：**看不出哪轮跑了什么、
+    某个模块的证据在哪个子目录**。
+
+    本地跑一次就重生成一次（挂在 `pytest_sessionfinish`，跟 `prune_old_runs` 同处）。
+    扫不到任何轮次就返回 None（不写空索引）。
+    """
+    if not root.is_dir():
+        return None
+    rows: list[tuple[str, str, int, int, int, int, str]] = []
+    for d in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
+        summary = _read_json(d / "summary.json")
+        if not summary:
+            continue
+        mods = sorted(p.name for p in d.iterdir() if p.is_dir())
+        rows.append((
+            d.name,
+            _suites_of_run(d, summary),
+            int(summary.get("passed") or 0),
+            int(summary.get("failed") or 0),
+            int(summary.get("error") or 0),
+            int(summary.get("skipped") or 0),
+            "、".join(mods) if mods else "（没建用例目录 —— 单测不抓屏）",
+        ))
+    if not rows:
+        return None
+
+    body = "\n".join(
+        f'<tr><td><a href="{name}/report.html">{name}</a></td><td>{suite}</td>'
+        f'<td class="ok">{p}</td><td class="bad">{f}</td><td class="err">{e}</td>'
+        f'<td class="skip">{sk}</td><td class="mods">{mods}</td></tr>'
+        for name, suite, p, f, e, sk, mods in rows
+    )
+    html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>本地证据索引</title><style>
+body{{margin:0;background:#f6f8fa;color:#1f2328;font-family:"Microsoft YaHei","Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.5}}
+.wrap{{max-width:1100px;margin:0 auto;padding:24px 16px 64px}}
+h1{{font-size:20px;margin:0 0 6px}}
+.meta{{color:#656d76;font-size:13px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d0d7de;border-radius:10px;overflow:hidden}}
+th,td{{padding:8px 12px;border-bottom:1px solid #eaeef2;text-align:left;font-size:13px}}
+th{{background:#f6f8fa;font-weight:600}}
+tr:last-child td{{border-bottom:none}}
+td.ok{{color:#1a7f37}}td.bad{{color:#c62828}}td.err{{color:#8a5300}}td.skip{{color:#656d76}}
+td.mods{{color:#656d76;font-size:12px}}
+a{{color:#0969da;text-decoration:none}}a:hover{{text-decoration:underline}}
+</style></head><body><div class="wrap">
+<h1>本地证据索引</h1>
+<div class="meta">{len(rows)} 轮 · 每轮一个目录，用例证据在 <b>&lt;轮次&gt;/&lt;模块&gt;/</b> 下
+（模块名 = 测试文件去掉 <code>test_</code> 前缀）· 点轮次名看该轮报告</div>
+<table><thead><tr><th>轮次</th><th>套件</th><th>过</th><th>红</th><th>错</th><th>跳</th><th>用例目录（模块）</th></tr></thead>
+<tbody>
+{body}
+</tbody></table></div></body></html>"""
+    out = root / "index.html"
+    out.write_text(html, encoding="utf-8")
+    return out
+
+
 def prune_old_runs(root: Path = EVIDENCE_ROOT, keep_days: int = 30) -> list[Path]:
     if keep_days <= 0 or not root.exists():
         return []
