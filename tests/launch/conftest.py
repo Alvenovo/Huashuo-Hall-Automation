@@ -67,12 +67,14 @@ def installed():
 def pytest_generate_tests(metafunc):
     """**只在测试函数声明了 `case` 形参时才动手** —— 对其它用例零副作用。
 
-    两种注入形态（见 `hall_auto/cases.py::injection_for`）：
+    三种注入形态：
 
+    - **按页面挂载**（通用用例函数）：函数名登记在 `hall_auto/drivers.py` 的
+      `PAGE_TEST_FUNCS` 里，就把用例文件里所有 `page` 匹配、且**没写 `ref`** 的用例收进来。
+      → **加一条同类型用例 = 只改 `cases/cases.yaml`，不用碰 Python。**
     - `params:` 列表 → `case` 是**其中一组参数**，pytest id = 那组的 `name`。
-    - `driver:` 模板 → `case` 是**整条用例**，pytest id = 用例编号。
+    - `driver:` 模板（单条，写了 `ref`）→ `case` 是**整条用例**，pytest id = 用例编号。
 
-    加一组参数 / 改期望值 = 改 `cases/cases.yaml`，不碰 Python。
     用例文件里查不到对应条目时**直接报错**，不静默跳过（静默跳过等于悄悄少跑用例）。
     """
     if "case" not in metafunc.fixturenames:
@@ -82,9 +84,22 @@ def pytest_generate_tests(metafunc):
 
     injected = cases_db.injection_for(metafunc.function.__name__)
     if injected is None:
+        # 通用用例函数？按 page 收（去掉参数后缀，nodeid 形如 `路径::函数名[参数]`）
+        ref = metafunc.definition.nodeid.split("[")[0]
+        page = cases_db.page_of_test_func(ref)
+        if page:
+            items = cases_db.cases_for_page(page)
+            if not items:
+                raise pytest.UsageError(
+                    f"{metafunc.function.__name__} 是页面 {page!r} 的通用用例函数，"
+                    f"但用例文件里没有 `page: {page}` 且没写 `ref` 的用例 —— 白跑一条"
+                )
+            metafunc.parametrize("case", items, ids=[str(c["id"]) for c in items])
+            return
         raise pytest.UsageError(
             f"{metafunc.function.__name__} 声明了 `case` 形参，"
-            f"但用例文件里没有它的 `tier: data` 条目（或既无 params 也无 driver）"
+            f"但用例文件里没有它的 `tier: data` 条目，它也不是任何页面的通用用例函数"
+            f"（`PAGE_TEST_FUNCS`）"
         )
     items, ids = injected
     metafunc.parametrize("case", items, ids=ids)

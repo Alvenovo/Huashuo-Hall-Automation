@@ -76,10 +76,15 @@ def validate(doc: dict) -> list[str]:
     seen: dict[str, int] = {}
     for i, c in enumerate(doc["cases"]):
         tag = c.get("id") or f"第 {i + 1} 条"
-        # status=todo 是「还没自动化、先登记着」：ref 与 suite 都允许为空
+        # 绑定的三种方式，各自需要什么：
+        #   ref 指函数（tier=code / 参数化用例）  → 必须有 ref
+        #   driver + page 自动挂到通用函数        → 不用 ref
+        #   status=todo（还没自动化）             → 不用 ref、不用 suite
         required = ("id", "title", "verify")
         if c.get("status") != "todo":
-            required += ("ref", "suite")
+            required += ("suite",)
+            if c.get("tier") != "data" or not c.get("driver"):
+                required += ("ref",)
         for key in required:
             if not c.get(key):
                 problems.append(f"{tag}: 缺字段 {key}")
@@ -119,6 +124,12 @@ def validate(doc: dict) -> list[str]:
                 problems.append(f"{tag}: controls_present 需要 page 字段")
             elif c["driver"] == "radio_group_exactly_one" and not c.get("group"):
                 problems.append(f"{tag}: radio_group_exactly_one 需要非空 group 字段")
+            # 没写 ref 的用例靠 `driver` + `page` 自动挂到通用函数上 —— 那个页面必须已登记
+            if not c.get("ref") and c["driver"] and c.get("page") not in _drv.PAGE_TEST_FUNCS:
+                problems.append(
+                    f"{tag}: 没写 ref，page={c.get('page')!r} 又不在 PAGE_TEST_FUNCS 里"
+                    f"（可用：{sorted(_drv.PAGE_TEST_FUNCS)}）—— 这条用例永远不会被跑到"
+                )
             elif c["driver"] == "controls_present" and c.get("page") not in _drv.PAGES:
                 problems.append(
                     f"{tag}: page={c.get('page')!r} 没在 hall_auto/drivers.py 的 PAGES 里"

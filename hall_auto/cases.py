@@ -111,3 +111,26 @@ def injection_for(
     raise ValueError(
         f"{case['id']} 是 tier=data，但既没有非空 params 也没有 driver —— 没有东西可注入"
     )
+
+
+def cases_for_page(page: str, path: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
+    """某个页面的**全部**用例（给通用用例函数用）。
+
+    这些用例**没有 `ref`** —— 它们靠 `driver` + `page` 自动挂到通用函数上，
+    所以「加一条同类型用例 = 只改用例文件」。
+    """
+    return [
+        c for c in all_cases(path)
+        if c.get("driver") and c.get("page") == page and not c.get("ref")
+    ]
+
+
+def page_of_test_func(func_ref: str, path: str | os.PathLike[str] | None = None) -> str | None:
+    """这个测试函数是不是某个页面的通用用例函数？是就返回页面名。
+
+    绑定表在 `hall_auto/drivers.py` 的 `PAGE_TEST_FUNCS`（延迟 import，避免拉 UI 栈）。
+    """
+    import importlib
+
+    drv = importlib.import_module("hall_auto.drivers")
+    return drv.page_for_test_func(func_ref)

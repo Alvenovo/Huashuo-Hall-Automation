@@ -37,11 +37,13 @@ def register_pid(cfg, installed):
 
 
 @pytest.mark.login
-def test_register_controls_present(register_pid, case):
-    """P1-C 注册页控件图：手机号/验证码/发送/密码/确认密码/协议/注册齐全
+def test_cases_register(register_pid, case):
+    """**注册页的通用用例函数** —— 承接用例文件里所有 `page: register` 的用例。
 
-    **期望控件列表在 `cases/cases.yaml`（编号 P1C-01）** —— 改期望值只改 YAML，
-    由 `hall_auto/drivers.py::controls_present` 模板执行。加一条同类控件图用例同理。
+    用例只要写 `driver` + `page: register`（**不用给 `ref`**）就会挂到这里，
+    所以**加一条注册页的控件图用例 = 只改 `cases/cases.yaml`**。
+
+    ⚠️ 这个函数必须留在本文件里 —— `register_pid` 是模块级 fixture，跨文件拿不到。
     """
     drivers.run(case["driver"], case["page"], register_pid, case)
 

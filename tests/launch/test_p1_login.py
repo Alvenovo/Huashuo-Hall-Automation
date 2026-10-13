@@ -110,10 +110,12 @@ def ready_pid(cfg, installed):
 
 
 @pytest.mark.login
-def test_login_dialog_controls(ready_pid, case):
-    """P1-B 登录弹窗控件图（默认页签）：手机号/密码/协议/登录/找回/注册齐全
+def test_cases_login_dialog(ready_pid, case):
+    """**登录弹窗（默认页签）的通用用例函数** —— 承接 `page: login_dialog` 的用例。
 
-    期望控件在 `cases/cases.yaml`（编号 P1B-01a）—— 改期望只改 YAML。
+    用例只要写 `driver` + `page: login_dialog`（不用给 `ref`）就会挂到这里，
+    所以**加一条同页面的用例 = 只改 `cases/cases.yaml`**。
+    ⚠️ 必须留在本文件里 —— `ready_pid` 是模块级 fixture。
     """
     logout(ready_pid)
     open_login_dialog(ready_pid)
@@ -121,14 +123,10 @@ def test_login_dialog_controls(ready_pid, case):
 
 
 @pytest.mark.login
-def test_login_sms_tab_controls(ready_pid, case):
-    """P1-B 登录弹窗控件图（短信验证码页签）：切过去后出现验证码输入框
+def test_cases_login_sms_tab(ready_pid, case):
+    """**登录弹窗（短信验证码页签）的通用用例函数** —— 承接 `page: login_sms_tab` 的用例。
 
-    期望控件在 `cases/cases.yaml`（编号 P1B-01b）。切页签这个**动作**在
-    `hall_auto/login.py::login_sms_tab_fields` —— 交互是代码、期望是数据。
-
-    2026-10-12 从原 `test_login_dialog_controls` 拆出来：原来一条用例里
-    「先断言默认页签、再切页签断言」两段，期望值没法全外置。拆开后两条都能纯数据驱动。
+    切页签这个**动作**在 `hall_auto/login.py::login_sms_tab_fields` —— 交互是代码、期望是数据。
     """
     logout(ready_pid)
     open_login_dialog(ready_pid)

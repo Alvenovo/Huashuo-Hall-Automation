@@ -48,11 +48,11 @@ def session(cfg, installed):
 
 
 @pytest.mark.settings
-def test_theme_controls_present(session, case):
-    """P1-D 主题控件图：浅色/深色/跟随系统三档齐全，且当前有且仅有一档选中
+def test_cases_settings_theme(session, case):
+    """**设置页·主题三档的通用用例函数** —— 承接用例文件里所有 `page: settings_theme` 的用例。
 
-    **期望档位在 `cases/cases.yaml`（编号 P1D-01）** —— 改档位名 / 加减档位只改 YAML，
-    由 `hall_auto/drivers.py::radio_group_exactly_one` 模板执行。
+    用例只要写 `driver` + `page: settings_theme`（不用给 `ref`）就会挂到这里。
+    ⚠️ 必须留在本文件里 —— `session` 是模块级 fixture。
     """
     drivers.run(case["driver"], case["page"], session.pid, case)
 

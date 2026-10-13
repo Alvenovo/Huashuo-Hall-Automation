@@ -142,7 +142,6 @@ cases:
   - 忘记密码
   - 注册账号
   verify: 登录弹窗默认页签上，手机号/密码/同意协议/登录/忘记密码/注册账号六项齐全
-  ref: tests/launch/test_p1_login.py::test_login_dialog_controls
   notes: 2026-10-12 从原 P1B-01 拆出（原用例里「默认页签 + 切页签」两段断言）；期望控件已外置
 - id: P1B-01b
   title: 登录弹窗控件图（短信验证码页签）
@@ -157,7 +156,6 @@ cases:
   expect:
   - CodeInput
   verify: 切到「短信验证码登录」页签后，出现验证码输入框
-  ref: tests/launch/test_p1_login.py::test_login_sms_tab_controls
   notes: 2026-10-12 从原 P1B-01 拆出；切页签这个动作在 hall_auto/login.py::login_sms_tab_fields
 - id: P1B-02
   title: 账号密码登录
@@ -240,7 +238,6 @@ cases:
   kind: case
   status: active
   verify: 手机号、验证码、发送、密码、确认密码、协议、注册按钮齐全
-  ref: tests/launch/test_p1_register.py::test_register_controls_present
   needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
   driver: controls_present
   page: register
@@ -351,7 +348,6 @@ cases:
   kind: case
   status: active
   verify: 浅色 / 深色 / 跟随系统三档齐全，且当前有且仅有一档处于选中态
-  ref: tests/launch/test_p1_theme.py::test_theme_controls_present
   needs: 本机已装大厅；会改外观档位，收尾自动还原
   driver: radio_group_exactly_one
   page: settings_theme

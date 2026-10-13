@@ -93,6 +93,14 @@ def _missing_in_inventory(in_code: set[str], registered: set[str]) -> list[str]:
 # 读真源与声明
 # ---------------------------------------------------------------------------
 
+def _page_bound_funcs() -> set[str]:
+    """「通用用例函数」的 ref 集合 —— 它们**不跟某一条用例一对一**，所以不参与
+    「代码 → 清单」的对账（一条函数承接同页面的 N 条用例）。"""
+    from hall_auto import drivers
+
+    return set(drivers.PAGE_TEST_FUNCS.values())
+
+
 def _load_doc() -> dict:
     import yaml
 
@@ -155,7 +163,7 @@ def test_every_code_case_is_registered_in_inventory():
 
     这条红了**别改断言** —— 去 `cases/cases.yaml` 补一条登记（或确认那个函数是不是该删）。
     """
-    registered = {c["ref"] for c in _load_doc()["cases"] if c.get("ref")}
+    registered = {c["ref"] for c in _load_doc()["cases"] if c.get("ref")} | _page_bound_funcs()
     unregistered = _missing_in_inventory(_code_refs(), registered)
     assert not unregistered, (
         "这些用例没有登记进 cases/cases.yaml —— 清单从此与代码脱节：\n  "
@@ -287,3 +295,40 @@ def test_marker_parser_reads_pytest_ini():
     declared = _declared_markers()
     for expect in ("unit", "install", "launch", "login", "settings", "security", "wb", "manual"):
         assert expect in declared, f"pytest.ini 解析漏了 {expect}"
+
+
+def test_page_bound_cases_resolve_to_a_registered_function():
+    """**没写 `ref` 的用例必须能解析出绑定** —— 否则它永远跑不到（静默漏跑）。
+
+    绑定规则：`driver` + `page`，且 `page` 登记在 `hall_auto/drivers.py` 的
+    `PAGE_TEST_FUNCS` 里。这是「**加一条同类型用例 = 只改 cases/cases.yaml**」的实现。
+    """
+    from hall_auto import drivers
+
+    bad: list[str] = []
+    for c in _load_doc()["cases"]:
+        if c.get("ref") or not c.get("driver"):
+            continue
+        page = c.get("page")
+        if page not in drivers.PAGE_TEST_FUNCS:
+            bad.append(f"{c['id']}: page={page!r} 不在 PAGE_TEST_FUNCS 里")
+        elif drivers.PAGE_TEST_FUNCS[page].split("::")[-1] not in {
+            ref.split("::")[-1] for ref in _code_refs()
+        }:
+            bad.append(f"{c['id']}: {drivers.PAGE_TEST_FUNCS[page]} 这个函数不存在")
+    assert not bad, "这些用例解析不出绑定，永远不会被跑到：\n  " + "\n  ".join(bad)
+
+
+def test_page_bound_funcs_live_next_to_their_fixture():
+    """通用用例函数必须和它那个页面的 fixture 在同一个文件里。
+
+    否则 pytest 会报 fixture 找不到 —— 但报的时候看不出是「位置放错了」。
+    （`register_pid` / `session` / `ready_pid` 都是**模块级** fixture，跨文件拿不到。）
+    """
+    from hall_auto import drivers
+
+    for page, ref in drivers.PAGE_TEST_FUNCS.items():
+        rel, _, func = ref.partition("::")
+        assert func in _funcs_in_file(rel), (
+            f"page={page!r} 登记的 {ref} 不存在 —— 通用用例函数必须在它那个页面的测试文件里"
+        )

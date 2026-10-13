@@ -149,6 +149,35 @@ DRIVERS: dict[str, tuple[str, Callable[[str, int, dict], None]]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 页面 → 承接它的「通用用例函数」
+#
+# 用例文件里只要给 `driver` + `page`（**不用给 `ref`**），就会被挂到这里的函数上。
+# 于是 **加一条同类型用例 = 只改 cases/cases.yaml，不用碰 Python**。
+#
+# 通用函数必须和该页面的 fixture 在**同一个文件**里 —— fixture 是模块级的，
+# 跨文件拿不到（`register_pid` / `session` / `ready_pid` 都只在本模块可见）。
+# ---------------------------------------------------------------------------
+PAGE_TEST_FUNCS: dict[str, str] = {
+    "register": "tests/launch/test_p1_register.py::test_cases_register",
+    "settings_theme": "tests/launch/test_p1_theme.py::test_cases_settings_theme",
+    "login_dialog": "tests/launch/test_p1_login.py::test_cases_login_dialog",
+    "login_sms_tab": "tests/launch/test_p1_login.py::test_cases_login_sms_tab",
+}
+
+
+def page_for_test_func(ref: str) -> str | None:
+    """这个测试函数是不是某个页面的通用用例函数？是就返回页面名。"""
+    for page, func_ref in PAGE_TEST_FUNCS.items():
+        if func_ref == ref:
+            return page
+    return None
+
+
+def test_func_for_page(page: str) -> str | None:
+    return PAGE_TEST_FUNCS.get(page)
+
+
 def run(driver: str, page: str, handle: int, case: dict) -> None:
     """按用例指定的模板执行。未知模板直接报错，不静默跳过。"""
     if driver not in DRIVERS:
