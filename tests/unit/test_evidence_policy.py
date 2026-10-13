@@ -77,7 +77,8 @@ def _session(tmp_path, mode):
 
 
 def _case_dir(run: Path, nodeid: str) -> Path:
-    return run / ev._safe_name(ev.module_of(nodeid)) / ev._safe_name(ev.case_of(nodeid))
+    return (run / ev._safe_path_name(ev.module_of(nodeid))
+            / ev._safe_path_name(ev.case_label(nodeid)))
 
 
 # ---------------- 两个模式各录什么 ----------------
@@ -516,3 +517,87 @@ def test_prune_never_touches_unparseable_dirs(tmp_path):
 
     assert ev.prune_old_runs(root, keep_days=1) == []
     assert keep.exists()
+
+
+# ---------------------------------------------------------------------------
+# 用例目录名：编号_标题（2026-10-13）
+#
+# 原来直接用函数名（`test_p0_06_search_lists_keyword_titles`）—— 能看出大意但读起来费劲，
+# 也跟用例清单对不上号。现在用「编号_标题」，能直接去 cases/cases.yaml / 清单 / 禅道对。
+# ---------------------------------------------------------------------------
+
+
+def test_case_label_uses_id_and_title():
+    """登记的用例 -> `编号_标题`；**编号是稳定键**（标题改了编号不改），还能防重名。"""
+    assert ev.case_label(
+        "tests/launch/test_p0_search.py::test_p0_06_search_lists_keyword_titles"
+    ) == "P0-06_搜索命中"
+
+
+def test_case_label_handles_page_bound_cases():
+    """按页面挂载的用例：**pytest 的参数 id 就是用例编号**，直接从 nodeid 里取。"""
+    assert ev.case_label(
+        "tests/launch/test_p1_register.py::test_cases_register[P1C-01]"
+    ) == "P1C-01_注册页控件图"
+
+
+def test_case_label_ignores_param_ids_that_are_not_case_ids():
+    """参数化用例的参数 id 是 `short-3` 这种，**不是**用例编号 -> 退回按函数名查。"""
+    assert ev.case_label(
+        "tests/launch/test_p1_register.py::test_register_invalid_password_blocks_submit[short-3]"
+    ) == "P1C-03_非法密码拦截（参数化）"
+
+
+def test_case_label_falls_back_to_function_name():
+    """**命名失败绝不能影响取证** —— 查不到就用函数名，不抛、不中断。"""
+    assert ev.case_label("tests/unit/test_xxx.py::test_some_guard") == "test_some_guard"
+    assert ev.case_label(
+        "tests/launch/test_x.py::test_brand_new_not_registered_yet"
+    ) == "test_brand_new_not_registered_yet"
+
+
+def test_safe_path_name_keeps_chinese_and_full_width_punctuation():
+    """**目录名清洗只剔真正非法的字符** —— 中文、全角括号、「」、冒号都要原样保留。
+
+    原来的 `_safe_name` 只留 CJK 汉字，会把 `（默认页签）` 洗成 `_默认页签_`（尾巴多个下划线），
+    「一眼看出是哪条用例」就没了。所以新加了路径专用的清洗。
+    """
+    assert ev._safe_path_name("P1B-01a_登录弹窗控件图（默认页签）") == "P1B-01a_登录弹窗控件图（默认页签）"
+    assert ev._safe_path_name("P0-06_搜索命中") == "P0-06_搜索命中"
+    assert ev._safe_path_name("只读探针：我的三个列表 + 公网可达性") == "只读探针：我的三个列表 + 公网可达性"
+    assert ev._safe_path_name("注册页不该出现「邀请码」输入框") == "注册页不该出现「邀请码」输入框"
+    assert "/" not in ev._safe_path_name("a/b"), "路径分隔符必须被剔掉"
+    assert ":" not in ev._safe_path_name("a:b"), "冒号（半角）必须被剔掉，否则 Windows 建不了目录"
+
+
+def test_safe_name_still_normalizes_for_apps_comparison():
+    """⚠️ `_safe_name` **不能**跟着改 —— `apps.py` 拿它比对界面文字，
+    「把标点洗成 `_`」是那个比对口径的一部分。这条钉住它别被顺手"优化"掉。"""
+    assert ev._safe_name("P1B-01a_登录弹窗控件图（默认页签）") == "P1B-01a_登录弹窗控件图_默认页签_"
+
+
+def test_record_puts_the_label_in_the_path(tmp_path):
+    """**端到端**：`record()` 真的把 `编号_标题` 用在目录名上（不是只算了个变量没用）。"""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    session = ev.EvidenceSession(run_dir, ev.MODE_FAILURE)
+
+    def _no_capture(_path):
+        return False
+
+    import hall_auto.evidence as mod
+
+    original = mod.capture_screen
+    mod.capture_screen = _no_capture
+    try:
+        rec = session.record(
+            "tests/launch/test_p0_search.py::test_p0_06_search_lists_keyword_titles",
+            ev.OUTCOME_FAILED, 0.1, "assert x",
+        )
+    finally:
+        mod.capture_screen = original
+
+    assert (run_dir / "launch" / "P0-06_搜索命中").is_dir(), (
+        "用例目录没叫「编号_标题」—— 命名改了但 record 没用上"
+    )
+    assert rec.screenshot is None or "P0-06_搜索命中" in rec.screenshot

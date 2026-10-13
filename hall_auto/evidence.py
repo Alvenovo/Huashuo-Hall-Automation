@@ -49,6 +49,57 @@ def new_run_dir(root: Path = EVIDENCE_ROOT, node: str | None = None) -> Path:
     return cand
 
 
+# 用例目录名要「一眼看出是哪条用例」。原来直接用函数名（`test_p0_06_search_lists_keyword_titles`），
+# 能看出大意但读起来费劲，也跟用例清单对不上号。
+# 现在用「**编号_标题**」（`P0-06_搜索命中`）—— 编号是稳定键、能防重名、还能直接去
+# `cases/cases.yaml` / `cases/清单.md` / 禅道里对上那一条。
+#
+# ⚠️ **绝不让命名影响取证**：查不到（新用例还没登记、用例文件缺失、标题含非法字符…）
+# 就**退回函数名**，不抛、不中断。
+_CASE_LABELS: dict[str, str] | None = None
+
+
+def _case_labels() -> dict[str, str]:
+    """`用例键 -> 编号_标题`。进程内缓存一次（跑批中途不会改用例文件）。
+
+    键有两种，因为 `nodeid` 有两种形状：
+      - 普通用例 / 参数化用例：**测试函数名**（`test_p0_06_search_lists_keyword_titles`）
+      - 按页面挂载的通用函数：**pytest 的参数 id 就是用例编号**（`test_cases_register[P1C-01]`）
+    """
+    global _CASE_LABELS
+    if _CASE_LABELS is not None:
+        return _CASE_LABELS
+    labels: dict[str, str] = {}
+    try:
+        from hall_auto import cases as cases_db
+
+        for c in cases_db.all_cases():
+            cid, title = str(c.get("id") or ""), str(c.get("title") or "")
+            if not cid:
+                continue
+            label = f"{cid}_{title}" if title else cid
+            labels[cid] = label                       # 参数 id 直接就是编号
+            ref = c.get("ref") or ""
+            if "::" in ref:
+                labels[ref.split("::")[-1]] = label   # 也按函数名认
+    except Exception:
+        labels = {}
+    _CASE_LABELS = labels
+    return labels
+
+
+def case_label(nodeid: str) -> str:
+    """用例目录该叫什么。查不到就退回函数名（**命名失败不影响取证**）。"""
+    raw = nodeid.split("::")[-1]
+    labels = _case_labels()
+    if "[" in raw and raw.endswith("]"):
+        param = raw[raw.index("[") + 1:-1]
+        if param in labels:                            # 参数 id = 用例编号
+            return labels[param]
+    func = raw.split("[")[0]
+    return labels.get(func, raw)
+
+
 def module_of(nodeid: str) -> str:
     rel = Path(nodeid.split("::")[0])
     return rel.parts[1] if len(rel.parts) >= 2 else "other"
@@ -61,6 +112,23 @@ def case_of(nodeid: str) -> str:
 def _safe_name(name: str, limit: int = 80) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_.\-\u4e00-\u9fff]", "_", name)
     cleaned = cleaned.strip(" .")
+    return (cleaned or "case")[:limit]
+
+
+# Windows 文件名里**真正非法**的只有这些（外加控制字符）。
+# 中文、全角括号（）「」、冒号：、逗号，都是**合法**的，不该被洗掉 ——
+# 「一眼看出是哪条用例」靠的就是它们。
+_PATH_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_path_name(name: str, limit: int = 80) -> str:
+    """**给目录名用的**清洗：只把真正非法的字符换成 `_`，其余原样保留。
+
+    ⚠️ **别拿它替掉 `_safe_name`** —— 那个还被 `apps.py` 用来比对界面文字
+    （`_safe_name(node) != popup_text(app_name)`），它的"把标点洗成 `_`"是**比对口径的一部分**，
+    改了会让两边对不上。两个函数各管各的，别合并。
+    """
+    cleaned = _PATH_ILLEGAL.sub("_", name).strip(" .")
     return (cleaned or "case")[:limit]
 
 
@@ -125,13 +193,15 @@ class EvidenceSession:
         调用方（`tests/conftest.py`）按 marker 判定：带 `unit` 的用例传 `capture=False`。
         """
         module, case = module_of(nodeid), case_of(nodeid)
+        # 目录名用「编号_标题」（查不到退回函数名）—— 见 case_label 的说明
+        label = _safe_path_name(case_label(nodeid))
         screenshot_rel = None
         if capture and self._should_capture(outcome):
-            case_dir = self.run_dir / _safe_name(module) / _safe_name(case)
+            case_dir = self.run_dir / _safe_path_name(module) / label
             case_dir.mkdir(parents=True, exist_ok=True)
             png = case_dir / "final.png"
             if capture_screen(png):
-                screenshot_rel = f"{_safe_name(module)}/{_safe_name(case)}/final.png"
+                screenshot_rel = f"{_safe_path_name(module)}/{label}/final.png"
             rec = CaseRecord(
                 module=module, case=case, nodeid=nodeid, outcome=outcome,
                 duration_s=duration, timestamp=datetime.now().isoformat(timespec="seconds"),
