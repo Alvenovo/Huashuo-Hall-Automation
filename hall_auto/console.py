@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import time
 from ctypes import wintypes
 
 __all__ = ["focus_console"]
@@ -227,25 +228,73 @@ def _force_foreground(hwnd: int) -> bool:
             u.AttachThreadInput(cur_tid, tid, False)
 
 
-def focus_console() -> bool:
-    """把跑测试的终端提到最前。成功返回 True；**任何情况下都不抛异常**。
+# 提上去之后等这么久，再看它还在不在前台 —— 留出"被抢回去"的时间窗。
+_SETTLE_SEC = 0.25
+# 被抢回去时重试几轮。人在环用例人本来就坐在那儿，多花一秒无所谓；
+# 关键是**别让人手点那一下**。
+_FOCUS_ROUNDS = 4
 
-    不抛是刻意的：这是"省一次 Alt+Tab"的便利，不是用例前置条件。
-    真拿不到窗口（终端类型没覆盖到、被别的进程抢走）就静默返回 False，
-    人照旧手动切一下即可，用例该过还得过。
-    """
-    if sys.platform != "win32":
+
+def _is_foreground(hwnd: int) -> bool:
+    u = _user32()
+    u.GetForegroundWindow.restype = wintypes.HWND
+    try:
+        return int(u.GetForegroundWindow() or 0) == int(hwnd)
+    except Exception:
         return False
+
+
+def _find_console_hwnd() -> int:
+    """三条路依次试，拿到第一个能用的句柄。"""
     for finder in (_console_hwnd, _console_title_hwnd, _ancestor_window):
         try:
             hwnd = finder()
         except Exception:
             hwnd = 0
-        if not hwnd:
-            continue
+        if hwnd:
+            return int(hwnd)
+    return 0
+
+
+def focus_console(rounds: int = _FOCUS_ROUNDS, settle_sec: float = _SETTLE_SEC) -> bool:
+    """把跑测试的终端提到最前。成功返回 True；**任何情况下都不抛异常**。
+
+    不抛是刻意的：这是"省一次 Alt+Tab"的便利，不是用例前置条件。
+
+    ## 2026-10-13 补：**不只看"提上去了"，还要看"待住了"**
+
+    用户实报（人在环忘记密码往返，改回密码那一步）：发完验证码后终端没到前台，
+    得手点一下才能输码。
+
+    真因是 `_force_foreground` **只验调用那一刻成了没有** —— 而大厅是 webview，
+    脚本刚操作过它，它**紧接着可能又把前台抢回去**：提上去的那一瞬间是成功的，
+    但人还没来得及敲键盘，焦点就没了。
+
+    所以改成「**提上去 → 等一下 → 再看它还在不在前台**」，被抢回去就重试，
+    最多 `rounds` 轮。失败时**打印可分辨的原因**（找不到窗口 / 被抢回去）——
+    这两条对应完全不同的修法，静默失败的话下次还得靠猜。
+    """
+    if sys.platform != "win32":
+        return False
+
+    hwnd = _find_console_hwnd()
+    if not hwnd:
+        print("（终端没能自动到前台：**没找到终端窗口** —— 手动点一下终端即可，不影响用例）")
+        return False
+
+    for _ in range(max(1, rounds)):
         try:
-            if _force_foreground(hwnd):
-                return True
+            if not _force_foreground(hwnd):
+                time.sleep(settle_sec)
+                continue
         except Exception:
+            time.sleep(settle_sec)
             continue
+        time.sleep(settle_sec)
+        if _is_foreground(hwnd):
+            return True
+
+    if _is_foreground(hwnd):
+        return True
+    print("（终端没能自动到前台：**提上去又被抢回来了** —— 手动点一下终端即可，不影响用例）")
     return False

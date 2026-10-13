@@ -76,7 +76,8 @@ def _ask_code(prompt: str) -> str:
     验证码输错时**会被 `ask_code_until_accepted` 再调一次**（同一个码不重发、
     只重问），所以这里每次都重新 `focus_console()`：重问时大厅窗口可能又被顶到前面了。
     """
-    focus_console()
+    if not focus_console():
+        print("   ⚠️ 上面那行说了原因；点一下终端窗口再输码即可，不影响用例结果。")
     return input(prompt).strip()
 
 

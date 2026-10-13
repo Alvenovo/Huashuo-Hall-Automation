@@ -335,3 +335,61 @@ def test_forgot_password_does_not_skip_when_flag_absent(monkeypatch):
     with pytest.raises(AttributeError):
         test_forgot_password_reset_manual(cfg=None, ready_pid=None)
 
+
+# ---------- focus_console：提上去之后还要「待住了」（2026-10-13） ----------
+#
+# 用户实报：人在环忘记密码往返、改回密码那一步，发完验证码后终端没到前台，
+# 得手点一下才能输码。真因是原来只验「调用那一刻成了没有」——
+# 大厅是 webview，脚本刚操作过它，它紧接着可能又把前台抢回去。
+# 所以现在改成「提上去 → 等一下 → 再看还在不在前台」，被抢就重试。
+
+
+def test_focus_console_retries_when_focus_is_stolen_back(monkeypatch):
+    """**核心回归**：提上去又被抢回去时必须重试，不能提一次就认成功。"""
+    forced: list[int] = []
+    monkeypatch.setattr(console, "_find_console_hwnd", lambda: 12345)
+    monkeypatch.setattr(console, "_force_foreground",
+                        lambda h: (forced.append(h), True)[1])
+    rounds = {"n": 0}
+
+    def _fg(hwnd):
+        rounds["n"] += 1
+        return rounds["n"] >= 3          # 前两轮被抢回去，第三轮待住
+
+    monkeypatch.setattr(console, "_is_foreground", _fg)
+
+    assert console.focus_console(settle_sec=0) is True
+    assert len(forced) >= 3, f"被抢回去之后没有重试（只提了 {len(forced)} 次）"
+
+
+def test_focus_console_gives_up_and_says_it_was_stolen(monkeypatch, capsys):
+    """一直被抢回去 -> 返回 False，并**说清是"被抢回来了"**（不是找不到窗口）。"""
+    monkeypatch.setattr(console, "_find_console_hwnd", lambda: 12345)
+    monkeypatch.setattr(console, "_force_foreground", lambda h: True)
+    monkeypatch.setattr(console, "_is_foreground", lambda hwnd: False)
+
+    assert console.focus_console(rounds=2, settle_sec=0) is False
+    out = capsys.readouterr().out
+    assert "抢回来" in out, "失败时要说清原因 —— 静默失败的话下次还得靠猜"
+    assert "不影响用例" in out, "要让一线知道这不是失败、不用去查"
+
+
+def test_focus_console_says_why_when_no_window_found(monkeypatch, capsys):
+    """找不到终端窗口 -> 返回 False，原因与「被抢回去」**可分辨**（两者修法不同）。"""
+    monkeypatch.setattr(console, "_find_console_hwnd", lambda: 0)
+
+    assert console.focus_console(settle_sec=0) is False
+    out = capsys.readouterr().out
+    assert "没找到终端窗口" in out
+
+
+def test_focus_console_succeeds_on_the_first_round_without_extra_rounds(monkeypatch):
+    """一次就待住了 -> 只提一次（别白白多提三下，那是闪屏）。"""
+    forced: list[int] = []
+    monkeypatch.setattr(console, "_find_console_hwnd", lambda: 7)
+    monkeypatch.setattr(console, "_force_foreground",
+                        lambda h: (forced.append(h), True)[1])
+    monkeypatch.setattr(console, "_is_foreground", lambda hwnd: True)
+
+    assert console.focus_console(settle_sec=0) is True
+    assert forced == [7]
