@@ -987,3 +987,48 @@ def test_release_docs_actually_declare_a_last_updated_date(sh_real):
         f"这些发放文档没有「最后更新：YYYY-MM-DD」那行，横幅里就没法带日期：{missing} —— "
         "一线因此无法判断手里的发放版是不是旧的"
     )
+
+
+# ---------------------------------------------------------------------------
+# 发放版横幅的「对不上就是旧的」机制，全靠源文档头部那行日期
+# ---------------------------------------------------------------------------
+
+
+def test_handbook_header_date_is_not_older_than_its_last_commit():
+    """两份发放版源头部的「最后更新」**不许早于该文件最后一次提交的日期**。
+
+    为什么：发放版横幅会把这行日期原样抄进去 ——
+    > 本版对应源文档「最后更新：YYYY-MM-DD」—— 拿它和仓库那份比，对不上就是旧的。
+
+    日期一过期，这个「对不上就是旧的」机制**就废了**：手里拿着旧发放版的人
+    跟源文档一比，日期一样，会以为是最新的。
+    2026-10-15 实付：两份源都还写着 10-12，而实际 10-13、10-15 都改过。
+
+    没有 git（浅克隆 / 打包分发）时跳过 —— 这条守卫不该成为跑不起来的原因。
+    """
+    import re
+    import subprocess
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[2]
+    for name in ("新机操作清单.md", "测试机操作手册.md"):
+        path = repo_root / "项目知识库" / name
+        m = re.search(r"最后更新：(\d{4}-\d{2}-\d{2})", path.read_text(encoding="utf-8"))
+        assert m, f"{name} 头部没有「最后更新：YYYY-MM-DD」那行 —— 发放版横幅拿不到日期"
+
+        try:
+            out = subprocess.run(
+                ["git", "log", "-1", "--format=%cs", "--", f"项目知识库/{name}"],
+                cwd=repo_root, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pytest.skip("没有 git —— 跳过日期新鲜度检查")
+        if out.returncode != 0 or not out.stdout.strip():
+            pytest.skip(f"git 查不到 {name} 的提交记录 —— 跳过")
+
+        committed = out.stdout.strip()
+        assert m.group(1) >= committed, (
+            f"{name} 头部写「最后更新：{m.group(1)}」，但它的最后一次提交是 {committed} —— "
+            f"日期过期了。发放版横幅抄的就是这个日期，「对不上就是旧的」那套会失效。"
+        )
