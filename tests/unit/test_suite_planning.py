@@ -459,3 +459,40 @@ def test_probe_suite_is_readonly_and_outside_full_run():
     assert probe.interactive is False
     assert "probe" not in suites.FULL_RUN_SUITES
     assert "test_p0_probe.py" in probe.paths[0]
+
+
+@pytest.mark.unit
+def test_handbook_suite_table_matches_the_code():
+    """《新机操作清单》里那张「想单独测哪一块 → 投哪个套件」表必须与 `suites.py` 一致。
+
+    那张表是**给人照着投任务用的** —— 漂了就会有人投一个不存在的套件名
+    （报错还算好），或者**新加了套件却没人知道能单投**。
+    表在清单里、权威在 `hall_auto/suites.py`，这条把两者钉在一起。
+    """
+    import re
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[2]
+    doc = (repo_root / "项目知识库" / "新机操作清单.md").read_text(encoding="utf-8")
+    m = re.search(r"^# 附：想单独测哪一块 → 投哪个套件[ \t]*$(.*?)(?=^# |\Z)",
+                  doc, re.MULTILINE | re.DOTALL)
+    assert m, "清单里没找到那张套件表（标题被改了？）"
+
+    listed: set[str] = set()
+    for line in m.group(1).splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        name = cells[1].strip("`").strip()
+        if re.fullmatch(r"[a-z][a-z0-9-]*", name):     # 表头「套件名」和分隔行不会被匹配
+            listed.add(name)
+
+    missing = set(suites.SUITES) - listed
+    extra = listed - set(suites.SUITES)
+    assert not missing and not extra, (
+        f"清单那张表与 suites.py 不一致：\n"
+        f"  代码里有、表里没有：{sorted(missing)}\n"
+        f"  表里有、代码里没有：{sorted(extra)}"
+    )
