@@ -32,21 +32,68 @@ OUTCOME_SKIPPED = "skipped"
 OUTCOME_ERROR = "error"
 
 
-def new_run_dir(root: Path = EVIDENCE_ROOT, node: str | None = None) -> Path:
-    """多机并行时目录带节点前缀，避免 20 台回传撞名（同日同时分）。
+# 轮次目录名 = `<日期>_<时刻>`（同一分钟撞了加 `_2`）。两种结构共用这个判据。
+_RUN_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{4})")
 
-    形如 `R12_2026-09-18_1030`；单机场景前缀仍会带（来自主机名），便于事后追溯是哪台跑的。
+
+def node_dir(root: Path = EVIDENCE_ROOT, node: str | None = None) -> Path:
+    """本机（或指定节点）在证据根下的目录：`<根>/<节点名>`。"""
+    return root / _safe_name(node or node_id(), limit=24)
+
+
+def new_run_dir(root: Path = EVIDENCE_ROOT, node: str | None = None) -> Path:
+    """建一轮证据目录，**两层**：`<根>/<节点名>/<日期>_<时刻>[_N]`。
+
+    ## 为什么按节点分一层（2026-10-15 用户要求）
+
+    原来是一层平铺：`<根>/<节点名>_<日期>_<时刻>`。节点名挤在**目录名前缀**里，
+    看不出这是"哪台机器的第几轮"，也没法把一台机器的历史圈在一起看。
+    改成 `<节点>/<时间戳>/` 之后：**一眼看出是哪台机器、这台机器跑过哪些轮**，
+    而且和农场侧（`C:/hall-farm/results/<节点>/<轮次>/`）**结构对齐**。
+
+    ⚠️ **配套改动不能漏**（漏了会张冠李戴，比不分组危险）：
+    - `tools/farm_agent.py` 的 `evidence_snapshot` / `newest_run_dir` ——
+      它靠「直接子目录的快照差」认本轮目录，加了这层必须改成遍历两层，
+      且快照要记**相对路径**（不同节点的轮次目录会同名）。
+    - `_render_html` 的兜底路径、`prune_old_runs`、`write_local_index`。
     """
-    root.mkdir(parents=True, exist_ok=True)
-    prefix = _safe_name(node or node_id(), limit=24)
+    nd = node_dir(root, node)
+    nd.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    base = root / f"{prefix}_{stamp}"
-    cand, n = base, 1
+    cand, n = nd / stamp, 1
     while cand.exists():
         n += 1
-        cand = root / f"{base.name}_{n}"
+        cand = nd / f"{stamp}_{n}"
     cand.mkdir(parents=True)
     return cand
+
+
+def is_run_dir(path: Path) -> bool:
+    """这个目录是不是「一轮证据」？判据 = 目录名里有 `<日期>_<时刻>`。"""
+    return path.is_dir() and bool(_RUN_STAMP.search(path.name))
+
+
+def run_dirs(root: Path = EVIDENCE_ROOT) -> list[Path]:
+    """证据根下**所有轮次目录**（按名字排序）。
+
+    认两种结构：
+    - **新**（2026-10-15 起）：`<节点>/<日期>_<时刻>[_N]/`
+    - **老**：`<节点>_<日期>_<时刻>[_N]/`（平铺一层）
+
+    老结构不清 —— 别的机器 `git pull` 之后老目录还在，让它们自然被
+    `prune_old_runs` 按时间收走即可，不必迁移。
+    """
+    if not root.is_dir():
+        return []
+    out: list[Path] = []
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        if is_run_dir(d):
+            out.append(d)                                   # 老：平铺
+        else:
+            out += [c for c in d.iterdir() if is_run_dir(c)]  # 新：一层节点
+    return sorted(out)
 
 
 # 用例目录名要「一眼看出是哪条用例」。原来直接用函数名（`test_p0_06_search_lists_keyword_titles`），
@@ -244,7 +291,8 @@ class EvidenceSession:
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         report = self.run_dir / "report.html"
-        report.write_text(_render_html(summary), encoding="utf-8")
+        # 显式把 run_dir 传进去，别依赖 _render_html 的兜底（兜底是按名字猜的）
+        report.write_text(_render_html(summary, self.run_dir), encoding="utf-8")
         return report
 
 
@@ -256,9 +304,6 @@ class EvidenceSession:
 # 2026-10-13 实测：本机 1140 个轮次目录里 **1124 个解析不了（98.6%）**，
 # 「保留 30 天」形同虚设，证据会无限累积（已积到 49520 张 final.png）。
 # 改成在名字里**搜**日期时间，两种格式都认。
-_RUN_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{4})")
-
-
 def _run_time(name: str) -> datetime | None:
     """从轮次目录名里取时间；取不到返回 None（**不删**，不猜）。"""
     m = _RUN_STAMP.search(name)
@@ -308,13 +353,13 @@ def write_local_index(root: Path = EVIDENCE_ROOT) -> Path | None:
     if not root.is_dir():
         return None
     rows: list[tuple[str, str, int, int, int, int, str]] = []
-    for d in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
+    for d in sorted(run_dirs(root), key=lambda p: p.name, reverse=True):
         summary = _read_json(d / "summary.json")
         if not summary:
             continue
         mods = sorted(p.name for p in d.iterdir() if p.is_dir())
         rows.append((
-            d.name,
+            f"{d.parent.name if d.parent != root else d.name.split('_')[0]}/{d.name}",
             _suites_of_run(d, summary),
             int(summary.get("passed") or 0),
             int(summary.get("failed") or 0),
@@ -362,14 +407,19 @@ def prune_old_runs(root: Path = EVIDENCE_ROOT, keep_days: int = 30) -> list[Path
         return []
     cutoff = datetime.now() - timedelta(days=keep_days)
     removed = []
-    for d in sorted(root.iterdir()):
-        if not d.is_dir():
-            continue
+    for d in run_dirs(root):                 # 两层/一层都认
         day = _run_time(d.name)
         if day is None or day >= cutoff:
             continue
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d)
+    # 顺手收掉被清空的节点目录（不然会留下一堆空壳）
+    for nd in (p for p in root.iterdir() if p.is_dir() and not is_run_dir(p)):
+        try:
+            if not any(nd.iterdir()):
+                nd.rmdir()
+        except OSError:
+            pass
     return removed
 
 
@@ -455,7 +505,12 @@ def _embed(png_rel: str, run_dir: Path) -> str | None:
 
 
 def _render_html(summary: dict, run_dir: Path | None = None) -> str:
-    run_dir = run_dir or (EVIDENCE_ROOT / summary["run"])
+    # ⚠️ 兜底不能拼 `EVIDENCE_ROOT / summary["run"]` —— `run` 只是目录**名**，
+    # 加了节点层之后那是错的路径，报告里的截图会全挂（`_embed` 找不到文件）。
+    # 按名字在所有轮次目录里找一层。
+    if run_dir is None:
+        name = summary.get("run")
+        run_dir = next((d for d in run_dirs() if d.name == name), EVIDENCE_ROOT / str(name))
     total = summary["total"] or 1
     rate = round(summary["passed"] / total * 100)
     decorated = []

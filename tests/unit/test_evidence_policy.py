@@ -272,7 +272,11 @@ def test_new_run_dir_creates_the_directory_even_with_no_evidence(tmp_path):
     run = ev.new_run_dir(root=tmp_path, node="R01")
 
     assert run.is_dir(), "目录没建出来 —— 农场就认不出本轮"
-    assert run.name.startswith("R01_"), "节点前缀是防多机回传撞名的，别丢"
+    # 2026-10-15 起是两层：`<根>/<节点>/<时间戳>`。节点那层同样是防多机回传撞名，
+    # 而且和农场侧（results/<节点>/<轮次>/）结构对齐。
+    assert run.parent.name == "R01", f"节点那层不对：{run}"
+    assert run.parent.parent == tmp_path, f"层次不对：{run}"
+    assert run.name[:4].isdigit() and "_" in run.name, f"轮次目录名该是 <日期>_<时刻>：{run.name}"
 
 
 def test_new_run_dir_does_not_collide_within_the_same_minute(tmp_path):
@@ -613,7 +617,7 @@ def test_record_puts_the_label_in_the_path(tmp_path):
 
 def _fake_run(root: Path, name: str, *, modules: list[str], passed: int = 1, failed: int = 0) -> None:
     d = root / name
-    d.mkdir()
+    d.mkdir(parents=True, exist_ok=True)   # 两层结构下 root 可能是 `<证据根>/<节点>`，得建父目录
     (d / "summary.json").write_text(json.dumps({
         "run": name, "node": "N", "total": passed + failed, "passed": passed,
         "failed": failed, "error": 0, "skipped": 0, "duration_s": 1.0,
@@ -701,3 +705,55 @@ def test_evidence_off_leaves_no_run_dir():
     # 2026-10-13 实测：全量单测因此假红过一次（909 过 0 红，退出码却是 1）。
     assert "failed" not in (proc.stdout or ""), f"off 跑失败了：\n{proc.stdout[-800:]}"
     assert after == before, f"`--evidence=off` 还是建了轮次目录：{sorted(after - before)}"
+
+
+# ---------------------------------------------------------------------------
+# 证据两层结构（`<节点>/<时间戳>`，2026-10-15）
+# ---------------------------------------------------------------------------
+
+
+def test_new_run_dir_is_two_levels(tmp_path):
+    """一轮 = `<根>/<节点>/<时间戳>`，同分钟撞了加 `_2`。"""
+    a = ev.new_run_dir(root=tmp_path, node="R01")
+    b = ev.new_run_dir(root=tmp_path, node="R01")
+    assert a.parent == tmp_path / "R01" and b.parent == tmp_path / "R01"
+    assert a.name != b.name and b.name.endswith("_2")
+    assert ev.new_run_dir(root=tmp_path, node="R02").parent == tmp_path / "R02"
+
+
+def test_run_dirs_accepts_both_layouts(tmp_path):
+    """**两种结构都要认** —— 别的机器 pull 之后老目录还在，不清它们。"""
+    (tmp_path / "NODE-A" / "2026-10-15_1003").mkdir(parents=True)
+    (tmp_path / "NODE-A" / "2026-10-15_1003_2").mkdir()
+    (tmp_path / "NODE-B_2026-10-14_0900").mkdir()          # 老：平铺
+    (tmp_path / "汇总").mkdir()                            # 不是轮次目录
+    got = [d.relative_to(tmp_path).as_posix() for d in ev.run_dirs(tmp_path)]
+    assert got == ["NODE-A/2026-10-15_1003", "NODE-A/2026-10-15_1003_2",
+                   "NODE-B_2026-10-14_0900"], got
+
+
+def test_prune_removes_old_runs_in_both_layouts_and_the_empty_node_dir(tmp_path):
+    """两层都要能清；清完的**空节点目录也要收掉**（不然留一堆空壳）。"""
+    from datetime import datetime, timedelta
+    old = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d_%H%M")
+    fresh = datetime.now().strftime("%Y-%m-%d_%H%M")
+    (tmp_path / "NODE-A" / old).mkdir(parents=True)
+    (tmp_path / "NODE-A" / fresh).mkdir()
+    (tmp_path / f"NODE-B_{old}").mkdir()
+
+    removed = ev.prune_old_runs(tmp_path, keep_days=30)
+
+    assert len(removed) == 2, f"两层各该清一个：{removed}"
+    assert (tmp_path / "NODE-A" / fresh).is_dir(), "30 天内的不能删"
+    assert (tmp_path / "NODE-A").is_dir(), "还有轮次，节点目录不能删"
+    # 老结构那轮被清掉之后没有节点目录可言；新结构被清空的节点目录才该收掉
+    (tmp_path / "NODE-C" / old).mkdir(parents=True)
+    ev.prune_old_runs(tmp_path, keep_days=30)
+    assert not (tmp_path / "NODE-C").exists(), "被清空的节点目录该收掉，别留空壳"
+
+
+def test_local_index_shows_which_node_each_run_belongs_to(tmp_path):
+    """索引页要标出轮次属于哪个节点（一层节点之后，"这台机器跑过哪些轮"才看得出来）。"""
+    _fake_run(tmp_path / "NODE-A", "2026-10-15_1003", modules=["launch"])
+    html = (ev.write_local_index(tmp_path)).read_text(encoding="utf-8")
+    assert "NODE-A/2026-10-15_1003" in html, "轮次名要带节点前缀"

@@ -1153,3 +1153,69 @@ def test_run_suite_resets_fixture_before_pytest_on_direct_path(monkeypatch, tmp_
     log_text = (tmp_path / "t.log").read_text(encoding="utf-8")
     assert "节点 rev=abc1234" in log_text, "共享日志要能认出节点这轮跑的哪版（绿轮没 stdout 可翻）"
 
+
+# ---------------------------------------------------------------------------
+# 证据改成两层（`<节点>/<时间戳>`）之后 —— 防张冠李戴（2026-10-15）
+#
+# 这层改动最危险的地方：不同节点的轮次目录**同名**（都是 `2026-10-15_1003`）。
+# 快照只记目录名的话，本轮新建的那个会被当成"快照里已有"而排除 →
+# `newest_run_dir` 返回 None（或更老的目录）→ **农场把别的运行的结果当本轮回传**。
+# ---------------------------------------------------------------------------
+
+
+def _mk_run(root: Path, node: str, stamp: str) -> Path:
+    d = root / node / stamp
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_evidence_snapshot_records_relative_paths(tmp_path, monkeypatch):
+    """快照记**相对路径**（`<节点>/<时间戳>`），不是目录名 —— 名字会在节点间撞。"""
+    root = tmp_path / "evidence"
+    _mk_run(root, "NODE-A", "2026-10-15_1003")
+    _mk_run(root, "NODE-B", "2026-10-15_1003")
+    monkeypatch.setattr(farm_agent, "EVIDENCE_ROOT", root)
+
+    snap = farm_agent.evidence_snapshot()
+
+    assert snap == {"NODE-A/2026-10-15_1003", "NODE-B/2026-10-15_1003"}, (
+        f"快照该记相对路径；只记名字的话两个节点会互相遮蔽：{snap}"
+    )
+
+
+def test_newest_run_dir_survives_a_same_named_run_on_another_node(tmp_path, monkeypatch):
+    """**核心回归**：别节点先跑过同一分钟的一轮，本轮的不能被挤掉。
+
+    复现路径：NODE-B 已有一轮 `2026-10-15_1003` → 拍快照 → NODE-A 本轮也建
+    `2026-10-15_1003`（两个节点同分钟同名，**这是加了两层之后的常态**）。
+    快照若只记名字，`2026-10-15_1003` 已在快照里 → 本轮被排除 → 返回 None。
+    """
+    root = tmp_path / "evidence"
+    _mk_run(root, "NODE-B", "2026-10-15_1003")          # 别的节点先有一轮
+    monkeypatch.setattr(farm_agent, "EVIDENCE_ROOT", root)
+
+    before = farm_agent.evidence_snapshot()
+    fresh = _mk_run(root, "NODE-A", "2026-10-15_1003")   # 本轮：另一个节点、同名
+
+    # **直接钉住键的形式**：快照里出现裸目录名 = 过滤键与 `newest_run_dir` 的键对不上，
+    # `exclude` 会变成**空操作** → 没产出新目录时它会回退到上一轮（张冠李戴）。
+    # 快照时本轮（NODE-A）那轮**还没建**，所以里面只该有别节点那个
+    assert before == {"NODE-B/2026-10-15_1003"}, (
+        f"快照该记相对路径（<节点>/<时间戳>），不是裸目录名 —— 后者会让 exclude 变空操作：{before}"
+    )
+
+    got = farm_agent.newest_run_dir(exclude=before)
+    assert got == fresh, f"本轮没被认出来（会张冠李戴回传上一轮）：{got}"
+    assert got != root / "NODE-B" / "2026-10-15_1003", "别节点那个同名的是上一轮，不该被当本轮"
+
+
+def test_newest_run_dir_still_refuses_to_reuse_an_old_run(tmp_path, monkeypatch):
+    """老行为不能丢：套件没产出证据时**返回 None**，不许回退到上一轮的目录。"""
+    root = tmp_path / "evidence"
+    _mk_run(root, "NODE-A", "2026-10-15_0900")
+    monkeypatch.setattr(farm_agent, "EVIDENCE_ROOT", root)
+
+    before = farm_agent.evidence_snapshot()
+    assert farm_agent.newest_run_dir(exclude=before) is None, (
+        "没有新目录时必须返回 None —— 回退到旧目录比没有证据危险得多"
+    )

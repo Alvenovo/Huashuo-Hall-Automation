@@ -108,7 +108,7 @@ from hall_auto.env_pack import (  # noqa: E402
     build_suite_env,
     credential_status,
 )
-from hall_auto.evidence import EVIDENCE_ROOT  # noqa: E402
+from hall_auto.evidence import EVIDENCE_ROOT, run_dirs  # noqa: E402
 from hall_auto.suites import (  # noqa: E402
     FULL_RUN_SUITES,
     build_command,
@@ -641,10 +641,15 @@ def ask_manual_password_roundtrip() -> bool:
 
 
 def evidence_snapshot() -> set[str]:
-    """跑套件**之前**给证据根目录拍个快照，用于事后判定"这一轮新增了哪个目录"。"""
-    if not EVIDENCE_ROOT.is_dir():
-        return set()
-    return {d.name for d in EVIDENCE_ROOT.iterdir() if d.is_dir()}
+    """跑套件**之前**给证据根目录拍个快照，用于事后判定"这一轮新增了哪个目录"。
+
+    ⚠️ **记的是相对路径（`<节点>/<时间戳>`），不是目录名。**
+    2026-10-15 证据改成两层（`reports/evidence/<节点>/<时间戳>/`）之后，
+    **不同节点的轮次目录会同名**（都是 `2026-10-15_1003`）——
+    只记名字的话，别节点的同名轮次会把本轮的挤掉，`newest_run_dir` 又回到"张冠李戴"。
+    """
+    # 键统一用 `as_posix()`：Windows 上 `str(Path)` 是反斜杠，跨平台/跨机器比不稳
+    return {d.relative_to(EVIDENCE_ROOT).as_posix() for d in run_dirs(EVIDENCE_ROOT)}
 
 
 def newest_run_dir(exclude: set[str] | None = None) -> Path | None:
@@ -658,8 +663,8 @@ def newest_run_dir(exclude: set[str] | None = None) -> Path | None:
     if not EVIDENCE_ROOT.is_dir():
         return None
     dirs = [
-        d for d in EVIDENCE_ROOT.iterdir()
-        if d.is_dir() and (exclude is None or d.name not in exclude)
+        d for d in run_dirs(EVIDENCE_ROOT)
+        if exclude is None or d.relative_to(EVIDENCE_ROOT).as_posix() not in exclude
     ]
     return max(dirs, key=lambda d: d.stat().st_mtime) if dirs else None
 
