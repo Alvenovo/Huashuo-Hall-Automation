@@ -561,3 +561,51 @@ def test_prune_tolerates_broken_receipts(farm):
 
 def test_prune_on_missing_dir_is_noop(tmp_path):
     assert farm_control.prune_done(tmp_path, keep_per_node=3) == []
+
+
+# ---------------------------------------------------------------------------
+# 「节点从路径取，不从目录名取」（2026-10-15）
+#
+# 证据/结果目录名从 `<节点>_<时间戳>` 变成 `<时间戳>`（节点那层挪成了父目录）。
+# 谁要是从目录名解析节点，就会**静默**拿到时间戳当节点名 —— 报告里张冠李戴。
+# ---------------------------------------------------------------------------
+
+
+def test_node_is_never_parsed_from_the_run_dir_name():
+    """**源码级**锁：`farm_control` / `farm_agent` 里不许从轮次目录名里切节点。
+
+    目录名现在是纯时间戳（`2026-10-15_1003`），切出来的"节点"会是 `2026-10-15`。
+    """
+    import re
+    from pathlib import Path as _P
+
+    root = _P(__file__).resolve().parents[2]
+    bad: list[str] = []
+    for name in ("farm_control.py", "farm_agent.py"):
+        src = (root / "tools" / name).read_text(encoding="utf-8")
+        for i, line in enumerate(src.splitlines(), 1):
+            if re.search(r"run_dir\.name\.split|split\(._.\)\[0\].*run_dir", line):
+                bad.append(f"{name}:{i}: {line.strip()[:90]}")
+    assert not bad, "从轮次目录名里解析节点了 —— 目录名已经没有节点：\n  " + "\n  ".join(bad)
+
+
+def test_farm_results_layout_puts_the_node_in_the_parent_dir(tmp_path, monkeypatch):
+    """端到端形状：回传目标是 `results/<节点>/<时间戳>/` —— 节点在**父目录**，不在名字里。"""
+    import shutil
+    from pathlib import Path as _P
+
+    root = tmp_path / "farm"
+    node = "NODE-A"
+    # 造一份"节点侧跑出来的"证据目录（新两层结构）
+    src_root = tmp_path / "evidence"
+    run = src_root / node / "2026-10-15_1003"
+    run.mkdir(parents=True)
+    (run / "summary.json").write_text("{}", encoding="utf-8")
+
+    dest = root / "results" / node / run.name        # farm_agent 里的写法
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(run, dest)
+
+    assert dest == root / "results" / node / "2026-10-15_1003"
+    assert dest.parent.name == node, "节点必须在父目录那层"
+    assert "_" not in dest.name[:10], f"目录名不该再带节点前缀：{dest.name}"

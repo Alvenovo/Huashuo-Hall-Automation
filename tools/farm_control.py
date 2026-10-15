@@ -400,8 +400,13 @@ def _collect_nodes_data(root: Path) -> dict[str, dict]:
 def _write_node_indexes(root: Path, nodes_data: dict) -> list[Path]:
     """给每个节点写一份 `results/<节点>/index.html`：目录名 ↔ 套件 ↔ 结果。
 
-    目录名不能改（`hall_auto/evidence.py` 的命名 + 节点侧 agent 已铺开，
-    改名要所有节点 pull 一次，收益不抵成本），所以在控制机侧补一张对照表。
+    这张表存在的理由（2026-10-12）：轮次目录名**只有时间戳**，看不出跑了什么套件、
+    哪台机器跑过几轮 —— 一个节点跑过 133 轮之后 `..._1349` 和 `..._1353` 根本分不清。
+
+    ⚠️ **2026-10-15 起目录名又变短了**：节点那层从目录名前缀挪成了**父目录**
+    （`results/<节点>/<时间戳>/`，与 `reports/evidence/<节点>/<时间戳>/` 对齐）。
+    **所以「节点」一律从路径取，绝不能从目录名解析** —— 目录名里已经没有节点了。
+    （守卫：`test_node_is_never_parsed_from_the_run_dir_name`。）
     """
     written = []
     for node, bucket in sorted(nodes_data.items()):
