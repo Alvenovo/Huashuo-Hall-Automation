@@ -242,6 +242,7 @@ def destructive_notice(suite_names: list[str]) -> str:
         what = {
             "install": "卸载并重装**华硕大厅本体** —— 跑完登录态/主题档位全部重置",
             "apps-lifecycle": "真装真卸夹具应用（走厂商 CDN，165MB 级安装包）",
+            "wb-install": "真装真卸 WorkBuddy（522MB 厂商包：装 → 验拉起 → 卸还原）",
         }.get(name, get_suite(name).needs)
         lines.append(f"    · {name}：{what}")
     lines.append("  ⚠ **只能在测试机上跑。** 办公机上投这一批会把大厅卸掉重装。")

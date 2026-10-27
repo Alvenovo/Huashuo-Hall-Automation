@@ -39,7 +39,7 @@ VALID_STATUS = {"active", "manual", "xfail", "destructive", "todo"}
 # 导出时的套件顺序（跟 suites.py 的 FULL_RUN_SUITES 语义一致：先只读、破坏性的在后）
 SUITE_ORDER = [
     "unit", "launch", "apps-detect", "probe", "login", "settings", "security", "wb",
-    "apps-lifecycle", "install", "login-manual",
+    "wb-install", "apps-lifecycle", "install", "login-manual",
 ]
 
 SUITE_LABEL = {
@@ -52,6 +52,7 @@ SUITE_LABEL = {
     "settings": "P1-D —— 设置",
     "security": "P2 —— 安全验证",
     "wb": "P2 —— WorkBuddy 入口",
+    "wb-install": "P2 —— WorkBuddy 行 25（真装真卸）",
     "probe": "探针（不是业务用例）",
     "未归属": "还没排套件（还没自动化）",
 }

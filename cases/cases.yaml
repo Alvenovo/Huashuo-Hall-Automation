@@ -1,6 +1,6 @@
 meta:
   说明: 用例清单唯一真源。脚本只读它，从不写回。改动请只改这个文件。
-  最后更新: '2026-10-12'
+  最后更新: '2026-10-27'
   字段说明: id 编号 / title 用例名 / suite 套件(见 hall_auto/suites.py) / marker pytest 标记 / tier code=逻辑在代码里 data=参数化数据驱动 / kind case=业务用例 probe=探针 / status active|manual|xfail|destructive / verify 具体验证什么 / ref 代码指针 / needs 运行前提
   编号规则: P0 沿用原清单编号；其余按组自编 P1A/P1B/P1C/P1D/P2S(安全)/P2W(WorkBuddy)
 cases:
@@ -483,7 +483,7 @@ cases:
   needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
 - id: P2W-06
   title: 已装则直接拉起
-  suite: wb
+  suite: wb-install
   marker:
   - wb
   - destructive
@@ -492,7 +492,7 @@ cases:
   status: destructive
   verify: WB 已安装时，点左下角 WB 入口应直接拉起 WB 程序（不再跳详情页/浏览器）
   ref: tests/launch/test_p2_workbuddy.py::test_wb_installed_entry_launches_wb
-  needs: WB 后台开关已开、WB 未安装；「已装则拉起」那条另需管理员
+  needs: WB 后台开关已开、WB 未安装；本条真装真卸，走提权套件 wb-install
 - id: P2W-07
   title: 隐私协议门禁
   suite: wb

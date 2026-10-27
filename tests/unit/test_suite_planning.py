@@ -58,7 +58,7 @@ def test_login_suite_still_covers_the_plain_login_cases():
 @pytest.mark.unit
 def test_server_pressure_suites_are_limited():
     """打服务端 / 厂商 CDN 的套件必须限流；不限并发会被限流产出假失败。"""
-    for name in ("install", "apps-lifecycle", "login", "wb"):
+    for name in ("install", "apps-lifecycle", "login", "wb", "wb-install"):
         suite = get_suite(name)
         assert suite.parallel == "limited", name
         assert suite.concurrency() >= 1, name
@@ -199,7 +199,7 @@ def test_full_run_includes_the_elevation_suites():
     正是 2026-09-23 这次改造要消灭的东西。它们能进是因为走提权通道执行，
     不是靠把 agent 整体提权（那会改掉 launch/login 的权限上下文）。
     """
-    for name in ("install", "apps-lifecycle"):
+    for name in ("install", "apps-lifecycle", "wb-install"):
         assert get_suite(name).needs_elevation, f"{name} 没标 needs_elevation"
         assert name in suites.FULL_RUN_SUITES, f"{name} 不在全量档里"
 

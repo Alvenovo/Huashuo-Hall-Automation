@@ -43,7 +43,6 @@ MARKER_APPS = "apps"
 MARKER_LOGIN = "login"
 MARKER_SETTINGS = "settings"
 MARKER_SECURITY = "security"
-MARKER_WB = "wb"
 MARKER_MANUAL = "manual"
 MARKER_DESTRUCTIVE = "destructive"
 
@@ -200,11 +199,24 @@ SUITES: dict[str, Suite] = {
     "wb": Suite(
         name="wb",
         paths=("tests/launch/test_p2_workbuddy.py",),
-        marker=MARKER_WB,
+        marker="wb and not destructive",
         parallel="limited",
         # 非破坏 6 条只读点击；但会占屏且点 WB 入口，跨机限流避免同时打 WB 后台开关检查
         max_concurrent=5,
-        needs="WB 后台开关已开、WB 未安装；破坏性行 25 另需管理员",
+        needs="WB 后台开关已开、WB 未安装；行 25 真装真卸已拆到 wb-install 套件",
+    ),
+    "wb-install": Suite(
+        name="wb-install",
+        paths=("tests/launch/test_p2_workbuddy.py",),
+        marker="wb and destructive",
+        parallel="limited",
+        # 522MB 厂商包走厂商 CDN；多台同时装会互相限流拖死，串行最稳
+        max_concurrent=1,
+        needs="管理员权限（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1；WB 后台开关已开且 WB 未安装",
+        # 安装器是**大厅的子进程**，提权与否跟着大厅走：非提权跑时 NSIS 弹 UAC 跳安全桌面，
+        # 脚本既看不见也点不到（2026-10-27 节点实测：向导停 180s 红、会话门禁 latch 非交互）。
+        # 只有把大厅本身起在提权令牌里，安装器才不再要 UAC —— 所以整条用例走提权通道。
+        needs_elevation=True,
     ),
 }
 
@@ -243,6 +255,7 @@ FULL_RUN_SUITES: tuple[str, ...] = (
     "settings",
     "security",
     "wb",
+    "wb-install",
     "apps-lifecycle",
     "install",
 )
