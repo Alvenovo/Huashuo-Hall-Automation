@@ -16,7 +16,10 @@ Windows 有**前台锁**：不是当前前台进程的进程调 `SetForegroundWi
 ## 找终端窗口的三条路（按可靠性排序）
 
 1. `GetConsoleWindow()` —— 经典 conhost 直接给句柄。
-   ⚠️ Windows Terminal 下它返回的是**隐藏的伪控制台窗**，所以必须先判 `IsWindowVisible`。
+   ⚠️ Windows Terminal 下它返回的是**伪控制台窗**（`PseudoConsoleWindow`），
+   必须按类名排掉：老版本它是隐藏的、判 `IsWindowVisible` 就够，但 Win11 26200 起
+   它**报可见**（2026-10-27 实测：visible=True、标题空），只判可见性会把它当终端 ——
+   而它永远抢不到前台，focus 四轮全败，人在环就得手点终端（当天节点实报）。
 2. `GetConsoleTitleW()` + `FindWindowW()` —— Windows Terminal 的窗口标题就是
    当前标签页标题，通常等于控制台标题；conhost 同理。这条同时覆盖两者。
 3. 沿**父进程链**往上走，`EnumWindows` 找那些 pid 名下的可见顶层窗 ——
@@ -37,6 +40,9 @@ __all__ = ["focus_console"]
 
 _SW_RESTORE = 9
 _TH32CS_SNAPPROCESS = 0x00000002
+# 经典 conhost 的窗口类名。Windows Terminal 的伪控制台窗是 `PseudoConsoleWindow`，
+# 不是终端本体，抢前台永远失败 —— 只认 conhost 这一个类。
+_CONHOST_CLASS = "ConsoleWindowClass"
 
 # 爬到这些进程就停：它们之上不再是"终端"，而且名下挂着桌面/任务栏窗口。
 _SHELL_EXES = frozenset({"explorer.exe"})
@@ -51,11 +57,13 @@ def _kernel32():
 
 
 def _console_hwnd() -> int:
-    """经典 conhost 的窗口句柄；Windows Terminal 下拿到的是隐藏窗，判可见性后丢弃。"""
+    """经典 conhost 的窗口句柄；Windows Terminal 的伪控制台窗按类名排掉。"""
     hwnd = _kernel32().GetConsoleWindow()
-    if hwnd and _user32().IsWindowVisible(hwnd):
-        return int(hwnd)
-    return 0
+    if not hwnd or not _user32().IsWindowVisible(hwnd):
+        return 0
+    if _window_class(int(hwnd)) != _CONHOST_CLASS:
+        return 0
+    return int(hwnd)
 
 
 def _console_title_hwnd() -> int:

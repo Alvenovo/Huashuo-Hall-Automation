@@ -393,3 +393,37 @@ def test_focus_console_succeeds_on_the_first_round_without_extra_rounds(monkeypa
 
     assert console.focus_console(settle_sec=0) is True
     assert forced == [7]
+
+
+# ---------- focus_console：伪控制台窗不是终端（2026-10-27） ----------
+#
+# 节点实报：人在环改密码那步终端还是没到前台，得手点。本机 WT 里复现：
+# Win11 26200 的 Windows Terminal 下 `GetConsoleWindow()` 给 `PseudoConsoleWindow`，
+# 且 `IsWindowVisible` 为**真**（老版本它是隐藏的，判可见性就够）。
+# 第 1 条路先拿到它 → 抢前台四轮全败 → 能拿到真窗口的第 2/3 条路根本不执行。
+
+
+class _FakeKernel32:
+    def GetConsoleWindow(self):
+        return 4321
+
+
+class _FakeUser32:
+    def IsWindowVisible(self, hwnd):
+        return 1
+
+
+def test_console_hwnd_rejects_visible_pseudo_console(monkeypatch):
+    """伪控制台窗报可见也抢不到前台 —— 不能当终端。"""
+    monkeypatch.setattr(console, "_kernel32", _FakeKernel32)
+    monkeypatch.setattr(console, "_user32", _FakeUser32)
+    monkeypatch.setattr(console, "_window_class", lambda hwnd: "PseudoConsoleWindow")
+    assert console._console_hwnd() == 0
+
+
+def test_console_hwnd_still_accepts_real_conhost(monkeypatch):
+    """排伪控制台窗别把真 conhost 也排掉 —— 那条路还是最可靠的。"""
+    monkeypatch.setattr(console, "_kernel32", _FakeKernel32)
+    monkeypatch.setattr(console, "_user32", _FakeUser32)
+    monkeypatch.setattr(console, "_window_class", lambda hwnd: "ConsoleWindowClass")
+    assert console._console_hwnd() == 4321
