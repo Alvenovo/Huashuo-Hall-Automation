@@ -291,6 +291,37 @@ def idle_line(node: str, root: Path, poll_index: int, problem: str) -> str:
     )
 
 
+def _drain_console_input() -> None:
+    """起人在环 pytest **之前**把控制台输入缓冲里残留的整行清掉。
+
+    Windows 的控制台输入缓冲是**按控制台共享**的：agent 前面问过两轮
+    （`ask_manual_participation` / `ask_manual_password_roundtrip`），人回「能」时
+    **多敲的回车会留在缓冲里**。pytest 继承同一个控制台，它的第一处 `input()`
+    （短信用例的 `_ask_code`）会把这条空行当成人的回答读走 → 立刻判「放弃」→
+    **验证码白发一条、用例 1 秒就 skip**（2026-10-27 节点实测：`test_sms_login_manual`
+    1.41s skipped「人工放弃回填」，就是这个）。
+
+    起 pytest 前清空缓冲，残留回车就漏不进去了。`ask_code_until_accepted` 那边另有
+    一道「连续两次空行才放弃」的兜底，两道一起才盖得住（人也可能在等待时误触回车）。
+
+    **失败不抛** —— 这只是防呆，清不掉也不该拦住整轮跑批；非 Windows 直接跳过。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.GetStdHandle.restype = wintypes.HANDLE
+        k.GetStdHandle.argtypes = [wintypes.DWORD]
+        k.FlushConsoleInputBuffer.argtypes = [wintypes.HANDLE]
+        k.FlushConsoleInputBuffer.restype = wintypes.BOOL
+        k.FlushConsoleInputBuffer(k.GetStdHandle(wintypes.DWORD(-10)))  # STD_INPUT_HANDLE
+    except Exception:
+        pass
+
+
 def run_suite(
     suite_name: str,
     shard_id: int,
@@ -360,6 +391,8 @@ def run_suite(
             fh.write("[env] 人在环：本段输出直接打到终端（提示语要让人看见），故不落本日志；")
             fh.write("用例结果仍在证据目录的 summary.json / report.html 里\n")
             fh.flush()
+        # 清掉 agent 问答残留的回车，别漏进 pytest 的第一处 input()（否则短信用例发码即 skip）
+        _drain_console_input()
         proc = subprocess.run(argv, cwd=str(REPO_ROOT), env=env, check=False)
     else:
         with log_path.open("a", encoding="utf-8") as fh:

@@ -1154,6 +1154,40 @@ def test_run_suite_resets_fixture_before_pytest_on_direct_path(monkeypatch, tmp_
     assert "节点 rev=abc1234" in log_text, "共享日志要能认出节点这轮跑的哪版（绿轮没 stdout 可翻）"
 
 
+def test_run_suite_drains_console_input_before_interactive_pytest(monkeypatch, tmp_path):
+    """**关键保护**：人在环起 pytest 前必须先清一次控制台输入缓冲，且顺序不能反。
+
+    agent 问答残留的回车若漏进 pytest 的第一处 `input()`，会被读成空行 →
+    短信用例「发了验证码就 1 秒 skip」（2026-10-27 节点实锤：`test_sms_login_manual`
+    1.41s skipped「人工放弃回填」）。清缓冲必须紧挨在 `subprocess.run(pytest)` 之前。
+    """
+    from hall_auto.suites import Suite
+
+    order: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        order.append("pytest")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(farm_agent, "subprocess", types.SimpleNamespace(run=fake_run, STDOUT=-1))
+    monkeypatch.setattr(farm_agent, "_drain_console_input", lambda: order.append("drain"))
+    monkeypatch.setattr(farm_agent, "repo_rev", lambda: "abc1234")
+    monkeypatch.setattr(
+        farm_agent, "get_suite",
+        lambda name: Suite(name=name, paths=(), marker="", reset_fixture=False),
+    )
+    monkeypatch.setattr(farm_agent, "build_command", lambda suite, shard, of, basetemp: ["tests/x.py"])
+    monkeypatch.setattr(farm_agent, "build_suite_env", lambda task_env, node_env_path: ({}, []))
+    monkeypatch.setattr(farm_agent, "credential_status", lambda env: {
+        "password_login": False, "microsoft_sso": False,
+        "change_password": False, "share_creds": False,
+    })
+
+    farm_agent.run_suite("login-manual", 1, 1, tmp_path / "t.log", interactive=True)
+
+    assert order == ["drain", "pytest"], f"清缓冲必须紧挨在起 pytest 之前：{order}"
+
+
 # ---------------------------------------------------------------------------
 # 证据改成两层（`<节点>/<时间戳>`）之后 —— 防张冠李戴（2026-10-15）
 #

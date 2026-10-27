@@ -260,7 +260,7 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
     这条**必然报「提交后未进入已登录态」**，而码其实是对的。
 
     验证码**输错了不用重跑整条**（2026-09-28）：脚本发现码没被接受会在原地
-    再问一次，最多 `CODE_MAX_ATTEMPTS` 次，**不会重发码**；随时直接回车放弃。
+    再问一次，最多 `CODE_MAX_ATTEMPTS` 次，**不会重发码**；随时连续两次回车放弃。
     """
     email = cfg.microsoft_account()
     if not email:
@@ -343,7 +343,11 @@ def test_sms_login_manual(cfg, ready_pid):
 
     验证码**输错了不用重跑整条**（2026-09-28）：脚本发现码没被接受会在原地
     再问一次，最多 `CODE_MAX_ATTEMPTS` 次，**不会重发码**（短信有服务端限流，
-    重跑一次就多一次超限风险）；随时直接回车放弃。
+    重跑一次就多一次超限风险）；随时连续两次回车放弃。
+
+    ⚠️ **单次空行不算放弃**（2026-10-27 节点实锤）：控制台残留的回车会被 `input()`
+    读成空行，若一次空行就判放弃，则「发了验证码 → 1 秒 skip」白发一条短信。
+    现在第一次空行只重问、连两次才放弃；agent 侧起 pytest 前还会清一次输入缓冲。
     """
     user, _ = cfg.test_account()
     if not user:

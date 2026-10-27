@@ -62,10 +62,15 @@ class CodeRejected(LaunchError):
 
 
 def _code_prompt(what: str, attempt: int, max_attempts: int) -> str:
-    """提示语。第 1 次不写"第 N 次"—— 免得没重试过的人以为前面已经输过。"""
+    """提示语。第 1 次不写"第 N 次"—— 免得没重试过的人以为前面已经输过。
+
+    ⚠️ 措辞是「**连续两次**回车放弃」，不是「直接回车放弃」：单次空行不再当放弃
+    （见 `ask_code_until_accepted`）—— 控制台残留的回车、人误触一下都会读成空行，
+    而此刻码已真发出去，一次空行就放弃等于白发一条短信。
+    """
     if attempt == 1:
-        return f"{what}（直接回车放弃）: "
-    return f"{what}｜第 {attempt}/{max_attempts} 次重输（直接回车放弃）: "
+        return f"{what}（连续两次回车放弃）: "
+    return f"{what}｜第 {attempt}/{max_attempts} 次重输（连续两次回车放弃）: "
 
 
 def ask_code_until_accepted(
@@ -77,18 +82,40 @@ def ask_code_until_accepted(
 ) -> tuple[str, object]:
     """问人要验证码 → 提交；被拒（`CodeRejected`）就再问一次，**不重发码**。
 
-    返回 `("ok", submit 的返回值)`；人直接回车放弃时返回 `("abandoned", None)`。
+    返回 `("ok", submit 的返回值)`；人**连续两次**空行放弃时返回 `("abandoned", None)`。
     试满 `max_attempts` 仍被拒，把最后一次的 `CodeRejected` 原样抛出去。
+
+    ## 为什么单次空行不算放弃（2026-10-27 节点实锤）
+
+    Windows 控制台输入缓冲是**按控制台共享**的。农场 agent 起 pytest 前先问过两轮
+    （参与 / 是否测改密码），人回「能」时**多敲的回车会留在缓冲里**；pytest 继承同一个
+    控制台，它的第一处 `input()`（短信用例的 `_ask_code`）会把这条空行当成回答读走 →
+    立刻判「放弃」→ **验证码白发一条、用例 1 秒就 skip**（那轮 `test_sms_login_manual`
+    1.41s skipped「人工放弃回填」就是这么来的）。
+
+    所以把「一次空行 = 放弃」改成「**连续两次空行 = 放弃**」：第一次空行只当误触/残留，
+    重问一次（**不重发码**）；真拿到码就照常提交。agent 侧另有一道 `FlushConsoleInputBuffer`
+    在起 pytest 前清缓冲（`tools/farm_agent.py`），两道一起才盖得住。
 
     `ask_code` 是**回调**（测试里传 `_ask_code`）—— 全项目只有那一处 `input()`，
     它负责"先把终端提到前台再问人"。散着写会漏掉切窗口而且**不报错**
     （守卫：`tests/unit/test_manual_loop_policy.py`）。
     """
     attempt = 1
+    empty_streak = 0
     while True:
         code = ask_code(_code_prompt(what, attempt, max_attempts))
         if not code:
-            return "abandoned", None
+            empty_streak += 1
+            if empty_streak >= 2:
+                return "abandoned", None
+            print(
+                "\n⚠️ 读到空行（多半是误触回车，或前面 agent 问答残留的回车）。"
+                "**验证码已经发出**，请把手机/邮箱收到的码输进来；"
+                "确实要放弃就**再回车一次**。\n"
+            )
+            continue
+        empty_streak = 0
         try:
             return "ok", submit(code)
         except CodeRejected as exc:
@@ -99,7 +126,7 @@ def ask_code_until_accepted(
             print(
                 f"   还有 {max_attempts - attempt + 1} 次机会："
                 "码没过期的话**重新输一次即可**（不会重发码，也不会重跑整条流程）。\n"
-                "   若确认码已过期或压根没收到，直接回车放弃，再重跑本条用例（那会重新发码）。"
+                "   若确认码已过期或压根没收到，连续回车两次放弃，再重跑本条用例（那会重新发码）。"
             )
 
 
@@ -1566,7 +1593,7 @@ def handle_bind_phone_popup(pid: int, phone: str, ask_code, timeout_sec: float =
 
     **验证码输错不会直接判死**：`submit_bind_code` 被拒会抛 `CodeRejected`，
     这里交给 `ask_code_until_accepted` 在原地重问人（不重发码），
-    人也可以随时回车放弃 → `"skipped"`。
+    人也可以随时放弃（连续两次回车）→ `"skipped"`。
 
     `ask_code` 是**回调**（测试里传 `_ask_code`），这里不 `input()` ——
     全项目只有测试文件那一处读 stdin，那一处负责「先切窗口再问人」，

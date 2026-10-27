@@ -593,13 +593,42 @@ def test_ask_code_until_accepted_gives_up_after_max_attempts():
 
 @pytest.mark.unit
 def test_ask_code_until_accepted_does_not_submit_when_the_human_presses_enter():
-    """人回车放弃 → **一次都不提交**（提交空码会真去校验一次，还可能记一次错）。"""
+    """人放弃 → **一次都不提交**；且要**连续两次空行**才判放弃。
+
+    单次空行不当放弃（2026-10-27 节点实锤）：控制台残留的回车 / 人误触都会读成空行，
+    而此刻码已真发出，一次空行就放弃 = 白发一条短信、用例 1 秒 skip。所以第一次空行只重问。
+    """
     submitted: list[str] = []
+    asked: list[str] = []
+
+    def _ask(prompt: str) -> str:
+        asked.append(prompt)
+        return ""
+
     status, value = login.ask_code_until_accepted(
-        lambda _p: "", lambda c: submitted.append(c), what="输入验证码"
+        _ask, lambda c: submitted.append(c), what="输入验证码"
     )
     assert (status, value) == ("abandoned", None)
     assert submitted == [], f"人放弃了还提交：{submitted}"
+    assert len(asked) == 2, f"应连问两次空行才放弃，实际问了 {len(asked)} 次：{asked}"
+
+
+@pytest.mark.unit
+def test_ask_code_until_accepted_single_empty_reprompts_then_accepts_code():
+    """**关键**：一次空行（误触 / 残留回车）不放弃 —— 重问后人给出真码，照常提交成功。
+
+    这是「发了验证码却 1 秒 skip」那条缺陷的直接反证：单次空行只重问、不重发码，
+    人随后把真码输进来就能登进去。
+    """
+    answers = iter(["", "123456"])
+    submitted: list[str] = []
+    status, value = login.ask_code_until_accepted(
+        lambda _p: next(answers),
+        lambda c: submitted.append(c) or f"ok-{c}",
+        what="输入验证码",
+    )
+    assert (status, value) == ("ok", "ok-123456")
+    assert submitted == ["123456"], f"空行不该被提交，且只提交真码一次：{submitted}"
 
 
 @pytest.mark.unit
