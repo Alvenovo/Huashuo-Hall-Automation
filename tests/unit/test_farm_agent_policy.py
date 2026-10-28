@@ -958,6 +958,7 @@ def test_task_covers_full_run_needs_the_whole_set():
 # 短信用例如果被写成只提邮箱，人就不会把手机放在手边。
 _EXPECTED_CODE_KIND = {
     "test_sms_login_manual": "短信",
+    "test_forgot_password_reset_manual": "密码",
 }
 
 
@@ -1004,8 +1005,8 @@ def test_manual_prompt_order_matches_the_test_file(monkeypatch):
     """报码顺序必须**等于** `test_p1_login.py` 里 `-m manual` 用例的文件顺序。
 
     成因（2026-09-22）：原来提示语把「短信登录」写在「微软登录」前面，实际跑的是微软先 ——
-    人按提示先掏手机，第一条要的却是邮箱码。现在人在环只剩短信一条，顺序等式看着平凡，
-    但以后加回第二条用例时它照样拦「提示语和实际顺序反了」。
+    人按提示先掏手机，第一条要的却是邮箱码。现在人在环是「短信登录 → 忘记密码往返」两条，
+    顺序照样得对上文件顺序，别把「第二问要不要测改密码」和报码顺序搞混。
     """
     out = _prompt_text(monkeypatch)
 
@@ -1052,6 +1053,60 @@ def test_manual_prompt_says_which_codes_need_a_phone(monkeypatch):
     """
     out = _prompt_text(monkeypatch)
     assert "手机" in out
+
+
+# 「忘记密码往返」要人转交 2 个短信码，还真改两次密码 —— 多数回归轮次不必每次验。
+# 第二问让人本轮选择跳过，省那 2 个码。守卫锁三件事：
+#   ① 默认（回车 / EOF / 非交互）都是「照常测」—— 不许静默跳过一条 P0 流程；
+#   ② 只有显式答「不测」才跳；③ 提示语说清省几个码、且跳过是带原因的 skip。
+
+
+def test_password_roundtrip_defaults_to_run_on_enter(monkeypatch):
+    """直接回车 = 照常测改密码（默认安全）。"""
+    _pretend_terminal(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+    assert farm_agent.ask_manual_password_roundtrip() is True
+
+
+def test_password_roundtrip_skips_on_explicit_no(monkeypatch):
+    """显式答「不测」才跳过。"""
+    _pretend_terminal(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "不测")
+    assert farm_agent.ask_manual_password_roundtrip() is False
+
+
+def test_password_roundtrip_runs_when_stdin_not_a_terminal(monkeypatch):
+    """非交互环境**不问、照常测** —— 与 ask_manual_participation 的方向相反：
+    默认行为本就是三条全跑，没人答时不许改变它。"""
+    _pretend_terminal(monkeypatch, stdin=False)
+    asked: list = []
+    monkeypatch.setattr("builtins.input", lambda *a: asked.append(a) or "不测")
+    assert farm_agent.ask_manual_password_roundtrip() is True
+    assert asked == [], "stdin 不是终端时连 input() 都不该调"
+
+
+def test_password_roundtrip_treats_eof_as_run(monkeypatch):
+    """stdin 关着（EOFError）当成照常测，绝不因为读不到输入就静默跳过。"""
+    _pretend_terminal(monkeypatch)
+
+    def _eof(*_a):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert farm_agent.ask_manual_password_roundtrip() is True
+
+
+def test_password_roundtrip_prompt_explains_the_two_codes(monkeypatch):
+    """提示语要说清：这条要 2 个短信码，不测能省，且跳过是带原因的 skip 不是漏测。"""
+    sink = _Tty()
+    monkeypatch.setattr(farm_agent.sys, "stdin", _Tty())
+    monkeypatch.setattr(farm_agent.sys, "stdout", sink)
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+    farm_agent.ask_manual_password_roundtrip()
+    out = sink.getvalue()
+    assert "忘记密码往返" in out
+    assert "2 个短信" in out
+    assert "skip" in out or "漏测" in out
 
 
 def test_run_suite_resets_fixture_before_pytest_on_direct_path(monkeypatch, tmp_path):

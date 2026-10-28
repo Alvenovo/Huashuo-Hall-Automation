@@ -294,8 +294,8 @@ def idle_line(node: str, root: Path, poll_index: int, problem: str) -> str:
 def _drain_console_input() -> None:
     """起人在环 pytest **之前**把控制台输入缓冲里残留的整行清掉。
 
-    Windows 的控制台输入缓冲是**按控制台共享**的：agent 前面问过一轮
-    （`ask_manual_participation`），人回「能」时
+    Windows 的控制台输入缓冲是**按控制台共享**的：agent 前面问过两轮
+    （`ask_manual_participation` / `ask_manual_password_roundtrip`），人回「能」时
     **多敲的回车会留在缓冲里**。pytest 继承同一个控制台，它的第一处 `input()`
     （短信用例的 `_ask_code`）会把这条空行当成人的回答读走 → 立刻判「放弃」→
     **验证码白发一条、用例 1 秒就 skip**（2026-10-27 节点实测：`test_sms_login_manual`
@@ -557,19 +557,20 @@ def run_suite_elevated(
 MANUAL_SUITE = "login-manual"
 
 # 人在环要跑的用例，**顺序就是终端里报码的顺序**，也**必须**是
-# `tests/launch/test_p1_login.py` 里 `-m manual` 选中那些用例的**文件顺序**（pytest 不改顺序）。
+# `tests/launch/test_p1_login.py` 里 `-m manual` 选中那两条的**文件顺序**（pytest 不改顺序）。
 #
 # 为什么把「顺序」也做成常量：提示语原来把「短信登录」写在「微软登录」前面，
-# 与实际执行顺序相反 —— 人照着提示准备，第一条就撞上没预告的邮箱码，
+# 与实际执行顺序相反 —— 人照着提示准备，第一条就撞上没预告的码，
 # 而那时手机可能还在充电。守卫会拿真实文件顺序来对（见 test_farm_agent_policy.py）。
 MANUAL_SEQUENCE: tuple[tuple[str, str], ...] = (
     ("test_sms_login_manual", "短信登录     —— 1 个手机短信验证码（会真发短信）"),
+    ("test_forgot_password_reset_manual", "忘记密码往返 —— 2 个手机短信验证码（会真把测试号密码改两次再改回）"),
 )
 
 # 「绑定手机号」弹窗要额外收的码。**必须写在提示语里**（2026-09-22 用户指出）：
 # 短信那条**不只**要登录验证码 —— 登录成功后，没绑过号的账号会弹绑定弹窗，
 # 脚本自动填号并点「获取验证码」，然后**还要人再给 1 个短信码**。
-# 提示语漏掉它的话，人手边只有邮箱、没手机，就卡在弹窗上了。
+# 提示语漏掉它的话，人以为一个码就完事、手机不在手边，就卡在弹窗上了。
 _MANUAL_BIND_WARNING: tuple[str, ...] = (
     "  ⚠ 手机要备在手边：短信验证码通过、登录成功后会弹",
     "     「绑定手机号」（没绑过的账号才弹）：脚本自动填号 + 自动点「获取验证码」，",
@@ -579,6 +580,10 @@ _MANUAL_BIND_WARNING: tuple[str, ...] = (
 # 认「能」的回复。中文单字必须显式列出来：`input().lower()` 对「能」没影响，
 # 但只认 y/yes 的话，按需求回「能」的人会被当成拒绝。
 _MANUAL_YES = frozenset({"能", "可以", "好", "是", "行", "y", "yes", "ok", "1"})
+
+# 认「本轮不测改密码」的回复。**默认（含直接回车）是照常测** —— 跳过要显式说出来，
+# 免得谁顺手回车就把一条 P0 流程静默跳了。跳过是带原因的 skip，不是消失。
+_MANUAL_NO = frozenset({"不测", "不用", "不", "不要", "跳过", "否", "n", "no", "skip", "0"})
 
 
 def _manual_capable() -> bool:
@@ -639,6 +644,32 @@ def ask_manual_participation() -> bool:
     except EOFError:
         return False
     return answer in _MANUAL_YES
+
+
+def ask_manual_password_roundtrip() -> bool:
+    """问一句本轮**要不要测「忘记密码往返」**。**只在已决定参与人在环后才问。**
+
+    返回 True = 照常测；False = 本轮跳过（调用方据此置 `HALL_MANUAL_SKIP_PASSWORD=1`）。
+
+    为什么单独问：这条用例要人转交 **2 个**短信验证码，还会真把测试号密码改两次再改回。
+    多数回归轮次并不需要每次都验它 —— 跳过就省那 2 个码。跳过是**带原因的 skip**
+    （用例开头 `pytest.skip(...)`），报告里看得出「本轮主动不测」，不是漏测、更不是假绿。
+
+    门禁与 `ask_manual_participation` 一致：非交互环境**直接 True（照常测）**，
+    保持"没人能答时不改变原有行为"；`EOFError` 同样当照常测。
+    """
+    if not _manual_capable():
+        return True
+    print("-" * 62, flush=True)
+    print("本轮要不要测「忘记密码往返」？", flush=True)
+    print("  · 这条要人转交 2 个短信验证码，还会真把测试号密码改两次再改回。", flush=True)
+    print("  · 不测就跳过它、省那 2 个码；报告里记为「本轮选择不测」（带原因的 skip，不是漏测）。", flush=True)
+    print("-" * 62, flush=True)
+    try:
+        answer = input("输入「不测」跳过（直接回车 = 照常测）: ").strip().lower()
+    except EOFError:
+        return True
+    return answer not in _MANUAL_NO
 
 
 def evidence_snapshot() -> set[str]:
@@ -839,6 +870,11 @@ def main() -> int:
         # 2026-09-22 真机踩过，见 hall_auto/suites.py 的 build_command。
         local_suite = get_suite(args.local)
         local_env: dict[str, str] = {}
+        # --local 跑人在环套件（步骤十八「错过后补跑」那条路）时，也问一句要不要测改密码，
+        # 与主流程一致。判据同样取套件的 `interactive`，不硬写 login-manual。
+        if local_suite.interactive and not ask_manual_password_roundtrip():
+            local_env["HALL_MANUAL_SKIP_PASSWORD"] = "1"
+            print("  本轮跳过「忘记密码往返」（不测改密码，省 2 个短信码）。", flush=True)
         rc, _creds = run_suite(
             args.local,
             args.shard_id,
@@ -957,8 +993,14 @@ def main() -> int:
         want_manual = args.ask_manual or task_covers_full_run(task)
         if not args.no_manual and want_manual:
             if ask_manual_participation():
-                # 只作用于这一次 manual 运行（单独的 dict），不污染 os.environ。
+                # 第二问：本轮要不要测「忘记密码往返」。答「不测」就置开关，
+                # 让那条用例带原因 skip，省掉它真发的 2 个短信码。
+                # 只作用于这一次 manual 运行（单独的 dict），不污染 os.environ，
+                # 免得这个常驻 agent 后面几轮被带着一起跳过。
                 manual_env = dict(task_env or {})
+                if not ask_manual_password_roundtrip():
+                    manual_env["HALL_MANUAL_SKIP_PASSWORD"] = "1"
+                    print("  本轮跳过「忘记密码往返」（不测改密码，省 2 个短信码）。", flush=True)
                 print("  开始人在环，按提示输入验证码。", flush=True)
                 item, manual_creds = execute_suite(
                     MANUAL_SUITE, 1, 1, root=root, node=node, task_id=task_id, log=log,

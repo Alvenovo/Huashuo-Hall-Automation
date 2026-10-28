@@ -220,6 +220,93 @@ def test_manual_retry_callbacks_never_send_a_code():
     assert not offenders, f"重试回调里在发码，每次重输都会重发一次：{offenders}"
 
 
+def _find_func(tree: ast.Module, name: str) -> ast.FunctionDef:
+    node = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name),
+        None,
+    )
+    assert node is not None, f"{name} 不见了"
+    return node
+
+
+@pytest.mark.unit
+def test_forgot_password_restore_failure_is_wrapped_and_reports_the_new_password():
+    """**关键保护**：还原程里**任何一步**失败，报错都要带「账户可能停在【新密码】」。
+
+    2026-09-28 真机实付：还原那程发码撞短信限流、裸抛了一句限流提示，
+    「密码可能已经改了」一个字都没说 —— 而第一程是**成功**的，账户真停在了 NEW 上。
+
+    所以盯的是**结构**：finally 里的还原调用必须被 try/except 包住，
+    且 handler 里要调 `_report_restore_failure`（它负责把警告抛出去或补进日志）。
+    """
+    fn = _find_func(_manual_tree(), "test_forgot_password_reset_manual")
+    finals = [n for n in ast.walk(fn) if isinstance(n, ast.Try) and n.finalbody]
+    assert finals, "这个用例没有 finally 还原程了？"
+
+    guarded = [
+        handler
+        for node in finals
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Try)
+        for handler in inner.handlers
+        if "_report_restore_failure" in _called_names(handler)
+    ]
+    assert guarded, (
+        "还原程没有被 try/except 包住并交给 `_report_restore_failure` —— "
+        "发码/提交任何一步裸抛，都会把「账户可能停在【新密码】」这句警告绕过去"
+    )
+
+
+@pytest.mark.unit
+def test_restore_failure_warning_names_the_new_password():
+    """`_report_restore_failure` 的两条出口：不盖原报错 / 没原报错时自己抛。
+
+    光有结构（上一条）不够 —— 还得确认那句警告里真的写了「新密码」，
+    否则现场读了也不知道账户被改过。
+    """
+    from hall_auto.launch import LaunchError
+
+    from tests.launch.test_p1_login import RESTORE_FAILED_WARNING, _report_restore_failure
+
+    assert "新密码" in RESTORE_FAILED_WARNING
+
+    # ① 本条用例本来就已失败 → 只补警告，不抛（原报错才是要查的东西）
+    _report_restore_failure(LaunchError("原报错"), LaunchError("还原挂了"))
+
+    # ② 没有原报错 → 把警告作为失败抛出去，并带上还原失败的原因
+    with pytest.raises(AssertionError) as exc:
+        _report_restore_failure(None, LaunchError("还原挂了"))
+    assert "新密码" in str(exc.value)
+    assert "还原挂了" in str(exc.value)
+
+
+def test_forgot_password_skips_before_touching_anything_when_opted_out(monkeypatch):
+    """本轮选择不测改密码（`HALL_MANUAL_SKIP_PASSWORD=1`）→ **立即 skip**。
+
+    传 `cfg=None, ready_pid=None`：跳过守卫若真在最前面，这两个参数一个都碰不到，
+    就不会 AttributeError —— 这就证明了 skip 发生在任何发码/改密码/读凭据之前。
+    """
+    from tests.launch.test_p1_login import test_forgot_password_reset_manual
+
+    monkeypatch.setenv("HALL_MANUAL_SKIP_PASSWORD", "1")
+    with pytest.raises(pytest.skip.Exception) as exc:
+        test_forgot_password_reset_manual(cfg=None, ready_pid=None)
+    assert "改密码" in str(exc.value)
+
+
+def test_forgot_password_does_not_skip_when_flag_absent(monkeypatch):
+    """开关没置（或非 "1"）时**不许**被这条守卫跳过 —— 照常往下走。
+
+    仍传 `cfg=None`：既然没在守卫处 skip，就会执行到 `cfg.test_account()`，
+    对 None 取属性抛 AttributeError。用它反证"守卫没触发、流程继续了"。
+    """
+    from tests.launch.test_p1_login import test_forgot_password_reset_manual
+
+    monkeypatch.delenv("HALL_MANUAL_SKIP_PASSWORD", raising=False)
+    with pytest.raises(AttributeError):
+        test_forgot_password_reset_manual(cfg=None, ready_pid=None)
+
+
 # ---------- focus_console：提上去之后还要「待住了」（2026-10-13） ----------
 #
 # 用户实报：人在环忘记密码往返、改回密码那一步，发完验证码后终端没到前台，

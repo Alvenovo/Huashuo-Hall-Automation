@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
 
 from hall_auto import drivers
 from hall_auto.console import focus_console
-from hall_auto.launch import start_fresh, wait_main_window, wait_until_ready
+from hall_auto.launch import LaunchError, start_fresh, wait_main_window, wait_until_ready
 from hall_auto.login import (
+    _by_aid,
+    _by_name,
     ask_code_until_accepted,
     handle_bind_phone_popup,
     login_dialog_open,
     login_with_password,
+    login_with_password_value,
     login_with_sms_code,
     logged_in,
     logout,
+    open_forgot_password_page,
     open_login_dialog,
+    request_forgot_sms,
     request_sms_code,
+    submit_forgot_reset,
 )
 from hall_auto.product import stop_main_process
 
@@ -178,3 +185,135 @@ def test_sms_login_manual(cfg, ready_pid):
     _bind_phone_if_prompted(cfg, ready_pid)
     logout(ready_pid)
     assert not logged_in(ready_pid)
+
+
+
+RESTORE_FAILED_WARNING = (
+    "还原程失败：账户可能停在【新密码】！"
+    "请先用 HALL_TEST_NEW_PASSWORD 登录一次，手工改回原密码；"
+    "或等短信冷却后重跑本条（它会自己再走一遍还原）。"
+)
+
+
+def _restore_old_password(ready_pid: int, user: str, old_password: str) -> None:
+    """第二程 NEW -> OLD 还原：改回原密码 + 用原密码登一次验证。
+
+    幂等开页（`open_forgot_password_page` 自己会在已在页面上时直接返回），
+    所以不管上一程把登录窗留在什么状态都能重新导航到位。
+
+    ⚠️ 这一段里**任何一步失败都意味着账户可能停在【新密码】** ——
+    调用方必须用 `_report_restore_failure` 收场，别让它裸抛。
+    """
+    logout(ready_pid)
+    open_forgot_password_page(ready_pid)
+    request_forgot_sms(ready_pid, user)
+    status, _ = ask_code_until_accepted(
+        _ask_code,
+        lambda code: submit_forgot_reset(ready_pid, code, old_password),
+        what="【第2次·还原原密码】输入手机收到的重置验证码",
+    )
+    if status != "ok":
+        raise LaunchError("人工放弃还原（账户可能仍停在【新密码】）")
+    logout(ready_pid)
+    login_with_password_value(ready_pid, user, old_password)
+    assert logged_in(ready_pid), "原密码登录后仍未进入已登录态，还原可能没生效"
+
+
+def _report_restore_failure(primary: BaseException | None, restore_exc: BaseException) -> None:
+    """还原程挂了怎么收场：**无论如何都要让人知道账户可能停在【新密码】**。
+
+    为什么单拎出来（2026-09-28 真机实付）：原来只有「人放弃还原」那条分支写了这句话，
+    而 `request_forgot_sms` 自己抛错（短信限流，见《运行手册.md》「坑 12」）会**绕过**它 ——
+    现场看到的是「连点 N 次发送按钮都没进倒计时态」，**一个字都没提密码可能已经改了**。
+    而那一轮第一程其实是成功的（只有一条异常链、总耗时 29.7s），
+    也就是说那个测试号真的停在了 NEW 上，却没人被告知。
+
+    `primary` 不为 None = 本条用例本来就已失败/跳过 → 只在日志里补一句警告，
+    **不盖掉原报错**（原报错才是这次要查的东西）；否则把警告本身作为失败抛出去。
+    """
+    message = f"{RESTORE_FAILED_WARNING}还原失败原因：{restore_exc}"
+    if primary is not None:
+        print(f"\n⚠️ {message}\n（本条用例本来就已经失败/跳过，上面那条才是原始报错）")
+        return
+    raise AssertionError(message) from restore_exc
+
+
+@pytest.mark.login
+@pytest.mark.manual
+def test_forgot_password_reset_manual(cfg, ready_pid):
+    """忘记密码往返用例：真改密码 + 重新登录验证 + 还原回原密码。
+
+    会真把测试号密码改两次（OLD→NEW 验证，再 NEW→OLD 还原），账户最终回到原状，
+    HALL_TEST_PASSWORD 不用改、用例可重复跑。需要人工转交 **两个** 短信验证码。
+    三个密码值全走环境变量（HALL_TEST_USER / HALL_TEST_PASSWORD / HALL_TEST_NEW_PASSWORD），
+    不落盘、不进对话、不进 git。和短信登录一样只在交互式终端跑（非 tty 自动 skip）。
+    还原程放在 finally：只要第一次提交发出去了，哪怕新密码验证那步报错，也一定把
+    密码压回 OLD（若本就是 OLD，再设一次无害），保证账户不会卡在 NEW 上。
+    2026-09-16 先以「点到发送为止」探针验过页面结构和发送链路，本版把真正的重置闭上。
+
+    两个码**输错了都能在原地重输**（2026-09-28，同一个码不重发）。人放弃不提交时
+    `submitted` 立不起来，还原程**跳过** —— 密码本来就没动，不该再要人输一个码。
+
+    ⚠️ 还原程里**任何一步**失败（含发码被限流），报错都必须带
+    `RESTORE_FAILED_WARNING` —— 那时账户可能真的停在【新密码】上。
+    2026-09-28 那轮就是漏了这条：还原程发码撞限流、裸抛了一句限流提示，
+    "密码可能已经改了"一个字都没说，而第一程其实是成功的。
+    """
+    # 本轮人工选择不测改密码：立即 skip，绝不发码、绝不动密码。
+    # 开关由 farm_agent 在问完「要不要参与人在环」后再问一句「要不要测改密码」置上，
+    # 省掉这条真发的 2 个短信码。skip 带原因，报告里是「本轮选择不测」而非空白/假绿。
+    if os.environ.get("HALL_MANUAL_SKIP_PASSWORD") == "1":
+        pytest.skip("本轮人工选择不测改密码（HALL_MANUAL_SKIP_PASSWORD=1）——省 2 个短信码")
+    user, old_password = cfg.test_account()
+    new_password = cfg.new_password()
+    if not (user and old_password and new_password):
+        pytest.skip("缺凭据：设置 HALL_TEST_USER / HALL_TEST_PASSWORD / HALL_TEST_NEW_PASSWORD")
+    if new_password == old_password:
+        pytest.skip("新密码与原密码相同，往返验证证明不了密码真被改过；换一个不同的 HALL_TEST_NEW_PASSWORD")
+    _require_interactive_tty("改密码要人工回填两次验证码")
+
+    # 第一程 OLD -> NEW
+    logout(ready_pid)
+    open_forgot_password_page(ready_pid)
+    for aid in ("MobileInput", "CodeInput", "CodeSendBtn", "PasswordSecInput", "RePasswordSecInput"):
+        assert _by_aid(ready_pid, "Edit", aid) is not None or _by_aid(ready_pid, "Button", aid) is not None, (
+            f"忘记密码页缺控件 {aid}"
+        )
+    assert _by_name(ready_pid, "Text", "忘记密码", exact=True) is not None, "忘记密码页缺标题「忘记密码」"
+    request_forgot_sms(ready_pid, user)
+    submitted = False
+
+    def _submit_new(code: str) -> dict:
+        """第一程提交。**只要被调用过就把 submitted 立起来** —— 密码可能已经变了，
+        还原程必须跑，哪怕这次提交本身报错。"""
+        nonlocal submitted
+        submitted = True
+        return submit_forgot_reset(ready_pid, code, new_password)
+
+    # 提交一旦发出，密码就可能已变 NEW；放进 try，让 finally 的还原程兜住提交本身报错的情况
+    primary: BaseException | None = None
+    try:
+        status, _ = ask_code_until_accepted(
+            _ask_code,
+            _submit_new,
+            what="【第1次·改成新密码】输入手机收到的重置验证码",
+        )
+        if status != "ok":
+            pytest.skip("人工放弃（验证码已发出，密码尚未修改）")
+        logout(ready_pid)
+        login_with_password_value(ready_pid, user, new_password)
+        assert logged_in(ready_pid), "新密码登录后仍未进入已登录态，重置可能没生效"
+    except BaseException as exc:  # noqa: BLE001 —— 连 skip 一起兜，见下
+        # 记下"这条用例本来就挂了/跳了"，还原程再挂时**不能盖掉它** ——
+        # 原报错才是这次要查的东西（2026-09-28：还原程自己抛错，把上面
+        # 「账户可能停在【新密码】」那句提示整个绕过去了，现场只看到限流报错）。
+        primary = exc
+        raise
+    finally:
+        # 人放弃（一次都没提交）时密码没动，**不必**白折腾一趟还原程 ——
+        # 那还要人再输一个码，而这时账户本来就是原样。
+        if submitted:
+            try:
+                _restore_old_password(ready_pid, user, old_password)
+            except BaseException as restore_exc:  # noqa: BLE001
+                _report_restore_failure(primary, restore_exc)
