@@ -366,6 +366,7 @@ def _collect_nodes_data(root: Path) -> dict[str, dict]:
                                                             "cases": {}, "runs": [],
                                                             "case_run": {}, "run_meta": {},
                                                             "credentials": {}})
+            node_env = _read_json(run_dir / NODE_ENV_EVIDENCE_NAME)
             run_name = summary.get("run") or run_dir.name
             bucket["runs"].append(run_name)
             bucket["run_meta"][run_name] = {
@@ -377,13 +378,15 @@ def _collect_nodes_data(root: Path) -> dict[str, dict]:
                 "total": summary.get("total", 0),
                 "duration_s": summary.get("duration_s", 0),
                 "suite": _suite_of(run_dir, summary),
+                # 任务号是「这一次投批」的唯一标识 —— 按批切单独报告、索引按投批分行都靠它。
+                "task_id": str(node_env.get("task_id") or "").strip(),
+                "repo_rev": str(node_env.get("repo_rev") or "").strip(),
             }
             # 目录名按 `节点_日期_时刻[_n]` 排，字典序≈时间序，所以最后一条就是最新一轮
             bucket["latest_run"] = run_name
             # 凭据状态来自节点随证据回传的 node_env.json（farm_agent 写）。
             # **必须真的读它**：报告的「凭据」列是测试人员区分「没配凭据」和
             # 「用例本身在跳过」的唯一依据（见《测试机操作手册》第四部分）。
-            node_env = _read_json(run_dir / NODE_ENV_EVIDENCE_NAME)
             creds = node_env.get("credentials")
             if isinstance(creds, dict) and creds:
                 bucket["credentials"] = creds
@@ -397,6 +400,84 @@ def _collect_nodes_data(root: Path) -> dict[str, dict]:
     return nodes_data
 
 
+def _batch_groups(bucket: dict) -> dict[str, list[str]]:
+    """任务号 → 该节点名下这一批的轮次目录。任务号来自每轮 `node_env.json`（farm_agent 写）。"""
+    groups: dict[str, list[str]] = {}
+    for run_name in bucket.get("runs", []):
+        task = str(bucket.get("run_meta", {}).get(run_name, {}).get("task_id") or "").strip()
+        if task:
+            groups.setdefault(task, []).append(run_name)
+    return groups
+
+
+def _render_batch_page(node: str, task: str, names: list[str], run_meta: dict) -> str:
+    """单批报告：**只含这一次投批**的套件、红绿、以及各套件自己报告的链接。
+
+    2026-10-28 用户实报：「每次跑完的结果不要放在一个文件里，不然不容易分清楚哪次跑的」。
+    节点 index 的两张表是跨批混排的、根目录矩阵是跨批合并的（老批次格子带 °），
+    看「这一次跑得怎么样」得自己拼；这一页一次投批一份，文件名带日期时刻 + 任务号，
+    资源管理器里按名字排就是时间序。
+    """
+    rows = []
+    for run_name in names:
+        meta = run_meta.get(run_name, {})
+        rows.append(
+            f'<tr><td class="suite">{html.escape(str(meta.get("suite") or "?"))}</td>'
+            f'<td class="run"><a href="../{html.escape(run_name)}/report.html">'
+            f'{html.escape(run_name)}</a></td>'
+            f'<td>{html.escape(str(meta.get("finished_at") or ""))}</td>'
+            f'<td>{meta.get("total", 0)}</td>'
+            f'<td style="color:{_COLOR["passed"]}">{meta.get("passed", 0)}</td>'
+            f'<td style="color:{_COLOR["failed"]}">{meta.get("failed", 0)}</td>'
+            f'<td style="color:{_COLOR["error"]}">{meta.get("errors", 0)}</td>'
+            f'<td style="color:{_COLOR["skipped"]}">{meta.get("skipped", 0)}</td></tr>'
+        )
+    revs = sorted({str(run_meta.get(n, {}).get("repo_rev") or "") for n in names} - {""})
+    finished = max((str(run_meta.get(n, {}).get("finished_at") or "") for n in names), default="")
+    passed = sum(int(run_meta.get(n, {}).get("passed", 0)) for n in names)
+    failed = sum(int(run_meta.get(n, {}).get("failed", 0)) for n in names)
+    errors = sum(int(run_meta.get(n, {}).get("errors", 0)) for n in names)
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{html.escape(node)} · {html.escape(task)} · 单批结果</title>
+<style>{_INDEX_CSS}</style></head><body><div class="wrap">
+<h1>{html.escape(node)} · 单批结果</h1>
+<div class="meta">任务 <b>{html.escape(task)}</b> &nbsp;·&nbsp; 完成于 {html.escape(finished or "？")}
+&nbsp;·&nbsp; 代码 rev {html.escape("、".join(revs) or "？")}<br>
+合计：通过 <b style="color:{_COLOR['passed']}">{passed}</b> /
+失败 <b style="color:{_COLOR['failed']}">{failed}</b> /
+错误 <b style="color:{_COLOR['error']}">{errors}</b>（{len(names)} 个套件轮次）</div>
+<div class="note">这一页<b>只含这一次投批</b>。点「轮次目录」进该套件自己的完整报告
+（每条用例的断言和截图都在里面）。跨批总览看 <code>..\\index.html</code>
+和农场根目录的矩阵报告。</div>
+<h2>这一批跑了什么</h2>
+<table><thead><tr><th style="text-align:left">套件</th><th style="text-align:left">轮次目录</th><th>完成时间</th><th>用例</th><th>通过</th><th>失败</th><th>错误</th><th>跳过</th></tr></thead><tbody>
+{"".join(rows)}
+</tbody></table>
+</div></body></html>
+"""
+
+
+def _write_batch_pages(root: Path, nodes_data: dict, only_task: str = "") -> list[Path]:
+    """一次投批 = 一份单独报告：`results/<节点>/按批/<日期_时刻>_<任务号>.html`。"""
+    written = []
+    for node, bucket in sorted(nodes_data.items()):
+        run_meta = bucket.get("run_meta", {})
+        for task, names in sorted(_batch_groups(bucket).items()):
+            if only_task and task != only_task:
+                continue
+            finished = max((str(run_meta.get(n, {}).get("finished_at") or "") for n in names),
+                           default="")
+            stamp = finished[:16].replace("T", "_").replace(":", "") or "未知时刻"
+            out_dir = root / "results" / node / "按批"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"{stamp}_{task}.html"
+            path.write_text(_render_batch_page(node, task, names, run_meta), encoding="utf-8")
+            written.append(path)
+    return written
+
+
 def _write_node_indexes(root: Path, nodes_data: dict) -> list[Path]:
     """给每个节点写一份 `results/<节点>/index.html`：目录名 ↔ 套件 ↔ 结果。
 
@@ -408,11 +489,14 @@ def _write_node_indexes(root: Path, nodes_data: dict) -> list[Path]:
     **所以「节点」一律从路径取，绝不能从目录名解析** —— 目录名里已经没有节点了。
     （守卫：`test_node_is_never_parsed_from_the_run_dir_name`。）
     """
+    # 索引里「按投批」表要链到单批报告；有没有生成过以磁盘为准，别凭本次扫描猜。
     written = []
     for node, bucket in sorted(nodes_data.items()):
+        batch_dir = root / "results" / node / "按批"
+        available = {p.stem for p in batch_dir.glob("*.html")} if batch_dir.is_dir() else set()
         path = root / "results" / node / "index.html"
         try:
-            path.write_text(_render_node_index(node, bucket), encoding="utf-8")
+            path.write_text(_render_node_index(node, bucket, available), encoding="utf-8")
         except OSError as exc:
             print(f"⚠ 节点索引写失败 {path}：{exc}")
             continue
@@ -448,6 +532,18 @@ def cmd_aggregate(args) -> int:
     if not nodes_data:
         raise SystemExit("没有可汇总的结果（results/ 下没有 summary.json）")
 
+    only_task = str(getattr(args, "task", "") or "").strip()
+    if only_task:
+        known = sorted({t for b in nodes_data.values() for t in _batch_groups(b)})
+        if only_task not in known:
+            shown = ", ".join(known[-8:]) or "（一个都没有）"
+            raise SystemExit(
+                f"results/ 里没有任务 {only_task} 的结果。现有任务号（最后 8 个）：{shown}"
+            )
+        for path in _write_batch_pages(root, nodes_data, only_task):
+            print(f"单批报告：{path}（只含这一个任务号的轮次，不跨批合并）")
+        return 0
+
     report_html = _render_matrix(nodes_data)
 
     # 归档一份带时间戳的：根目录那个固定名会被下一轮直接覆盖，10-09 那份就是这么没的，
@@ -468,10 +564,15 @@ def cmd_aggregate(args) -> int:
     out = root / "aggregate_report.html"
     out.write_text(report_html, encoding="utf-8")
 
+    # 单批页要先写：索引的「按投批」表以磁盘上有没有单批页决定链不链，
+    # 顺序反了第一次跑出来的索引会整列「未生成」。
+    task_files = _write_batch_pages(root, nodes_data)
     indexes = _write_node_indexes(root, nodes_data)
 
     print(f"汇总报告：{out}")
     print(f"归档副本：{archived}")
+    if task_files:
+        print(f"单批报告：{len(task_files)} 份（results\\<节点>\\按批\\，一次投批一份，不跨批合并）")
     if indexes:
         print(f"节点索引：{len(indexes)} 份（results\\<节点>\\index.html，目录名 ↔ 套件 ↔ 结果）")
     print(f"覆盖节点 {len(nodes_data)} 台，用例 {len({c for v in nodes_data.values() for c in v['cases']})} 条")
@@ -706,18 +807,62 @@ def _verdict(meta: dict) -> str:
     return '<span style="color:#9aa0a6">无记录</span>'
 
 
-def _render_node_index(node: str, bucket: dict) -> str:
-    """单节点轮次索引：**目录名 ↔ 套件 ↔ 结果**。
+def _render_node_index(node: str, bucket: dict, available: set[str] = ()) -> str:
+    """单节点轮次索引：**目录名 ↔ 套件 ↔ 结果**，顶部另有一张「按投批」表。
 
     2026-10-12 用户实报：`LAPTOP-x_2026-09-29_1349` 这类目录名里只有节点和时间，
     一个节点跑过 133 轮之后，资源管理器里完全分不清谁是谁，也没法「拿报告去对应校验」。
     套件名本来就写在每轮的 `node_env.json` 里，只是没人把它摊到目录这一层 —— 这里补上。
+
+    2026-10-28 用户又实报：「每次跑完的结果不要放在一个文件里，不然不容易分清楚哪次跑的」——
+    下面按套件/按目录的两张表都是**跨批混排**的，看「这一次投批跑得怎么样」要自己拼。
+    所以顶部加「按投批看」：一次投任务一行，链到 `汇总/<任务号>.html`（只含这一批）。
 
     表格按**目录名字典序**排（≈ 时间序），与资源管理器的顺序一致，方便左右对照。
     """
     runs = bucket.get("runs", [])
     run_meta = bucket.get("run_meta", {})
     latest = bucket.get("latest_run", "")
+
+    # ---- 按投批分组：任务号来自每轮 node_env.json；老轮次没任务号的归到「早期」----
+    task_groups: dict[str, list[str]] = {}
+    legacy: list[str] = []
+    for run_name in runs:
+        task = str(run_meta.get(run_name, {}).get("task_id") or "").strip()
+        (task_groups.setdefault(task, []) if task else legacy).append(run_name)
+    task_rows = []
+    # 按**完成时间**倒序，不能按任务号字符串倒序：老任务号有过 `task_toast_probe` 这种
+    # 不带日期的名字，字符串序会把它（10-09）排到最新一行去。
+    def _finished_of(names: list[str]) -> str:
+        return max((str(run_meta.get(n, {}).get("finished_at") or "") for n in names), default="")
+    for task in sorted(task_groups, key=lambda t: _finished_of(task_groups[t]), reverse=True):
+        names = task_groups[task]
+        metas = [run_meta.get(n, {}) for n in names]
+        suites = "、".join(sorted({str(m.get("suite") or "?") for m in metas}))
+        passed = sum(int(m.get("passed", 0)) for m in metas)
+        failed = sum(int(m.get("failed", 0)) for m in metas)
+        errors = sum(int(m.get("errors", 0)) for m in metas)
+        finished = _finished_of(names)
+        stem = next((s for s in available if s.endswith("_" + task)), "")
+        if stem:
+            link = f'<a href="./按批/{html.escape(stem)}.html">{html.escape(task)}</a>'
+        else:
+            link = f'<span class="empty">{html.escape(task)}（未生成单批报告）</span>'
+        task_rows.append(
+            f'<tr><td class="run">{link}</td><td>{len(names)}</td>'
+            f'<td class="suite">{html.escape(suites)}</td>'
+            f'<td>{html.escape(finished)}</td>'
+            f'<td style="color:{_COLOR["passed"]}">{passed}</td>'
+            f'<td style="color:{_COLOR["failed"]}">{failed}</td>'
+            f'<td style="color:{_COLOR["error"]}">{errors}</td></tr>'
+        )
+    if legacy:
+        task_rows.append(
+            f'<tr><td class="empty">早期 {len(legacy)} 轮（节点没写任务号）</td>'
+            f'<td>{len(legacy)}</td><td colspan="5" class="empty">见下方「全部轮次」表</td></tr>'
+        )
+    if not task_rows:
+        task_rows.append('<tr><td colspan="7" class="empty">这个节点还没有任何一轮结果</td></tr>')
 
     rows = []
     for run_name in runs:
@@ -784,7 +929,13 @@ def _render_node_index(node: str, bucket: dict) -> str:
 &nbsp;·&nbsp; 生成于 {html.escape(datetime.now().isoformat(timespec="seconds"))}<br>{env_bits}</div>
 
 <div class="note">左边「轮次目录」就是资源管理器里 <code>results\\{html.escape(node)}\\</code> 下的文件夹名，
-点进去是该轮的报告。<b>按套件筛一下</b>就能只留你关心的那几轮。</div>
+点进去是该轮的报告。<b>按套件筛一下</b>就能只留你关心的那几轮。<br>
+想看「<b>某一次投批</b>整体跑得怎么样」看第一张表：一次投批一行，点任务号是只含这一批的报告。</div>
+
+<h2>按投批看（一次投任务 = 一行，新在上）</h2>
+<table><thead><tr><th style="text-align:left">单批报告</th><th>轮次数</th><th style="text-align:left">套件</th><th>完成时间</th><th>通过</th><th>失败</th><th>错误</th></tr></thead><tbody>
+{"".join(task_rows)}
+</tbody></table>
 
 <h2>按套件看（每个套件最近一轮）</h2>
 <table><thead><tr><th style="text-align:left">套件</th><th>轮次数</th><th style="text-align:left">最近一轮</th><th>完成时间</th><th>结论</th></tr></thead><tbody>
@@ -828,6 +979,7 @@ def main() -> int:
     p_prune = sub.add_parser("prune", help="清理 done/ 的老回执（每节点保留最新 3 份）")
     p_prune.set_defaults(func=cmd_prune)
     p_agg = sub.add_parser("aggregate", help="汇总成节点×用例矩阵")
+    p_agg.add_argument("--task", default="", help="只出这一个任务号的单批报告（汇总/<任务号>.html），不碰总矩阵")
     p_agg.set_defaults(func=cmd_aggregate)
 
     p_idx = sub.add_parser("index", help="只出各节点的轮次索引（目录名 ↔ 套件 ↔ 结果）")

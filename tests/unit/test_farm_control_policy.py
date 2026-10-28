@@ -609,3 +609,106 @@ def test_farm_results_layout_puts_the_node_in_the_parent_dir(tmp_path, monkeypat
     assert dest == root / "results" / node / "2026-10-15_1003"
     assert dest.parent.name == node, "节点必须在父目录那层"
     assert "_" not in dest.name[:10], f"目录名不该再带节点前缀：{dest.name}"
+
+
+# ---------------- 一次投批 = 一份单独报告 ----------------
+
+# 2026-10-28 用户实报：「每次跑完的结果不要放在一个文件里，不然不容易分清楚哪次跑的」。
+# 之前只有三种视图：按套件的轮次目录（散）、节点 index（跨批混排）、根目录矩阵（跨批合并、
+# 老批次格子带 °）—— 没有一个是「这一次投批」为单位的。用户拍板：一次投批一个文件，
+# 落 `results/<节点>/按批/<日期_时刻>_<任务号>.html`，节点 index 顶部加「按投批」表指过去。
+
+
+def _put_batch(farm, node, task, suites_runs):
+    """造一批：`suites_runs` = [(run 目录名, 套件, 用例...)]，共用一个任务号。
+
+    `finished_at` 从目录名推（`R01_2026-10-28_1000` → `2026-10-28T10:00:00`）——
+    单批页文件名取 finished_at，两者对不上就没法断言「文件名带日期」。
+    """
+    for run, suite, cases in suites_runs:
+        stamp = run.split("_", 1)[1]
+        finished = f"{stamp[:10]}T{stamp[11:13]}:{stamp[13:15]}:00"
+        run_dir = _put_cases(farm, node, run, cases, finished_at=finished)
+        (run_dir / farm_control.NODE_ENV_EVIDENCE_NAME).write_text(
+            json.dumps({"node": node, "task_id": task, "suite": suite,
+                        "repo_rev": "abc1234", "credentials": {}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    return run_dir
+
+
+def test_aggregate_writes_one_page_per_dispatch(farm):
+    """**核心**：一次投批一份单独报告，且**只含这一批**的轮次。
+
+    两批各跑两个套件；T1 的单批页里不许出现 T2 的套件/轮次 —— 混进去就又回到
+    「分不清楚哪次跑的」了。
+    """
+    _put_batch(farm, "R01", "task_A", [
+        ("R01_2026-10-28_1000", "launch", [_case("tests/launch/test_p0_launch.py::test_a", "passed")]),
+        ("R01_2026-10-28_1001", "unit", [_case("tests/unit/test_x.py::test_u", "failed", "AssertionError")]),
+    ])
+    _put_batch(farm, "R01", "task_B", [
+        ("R01_2026-10-28_1100", "settings", [_case("tests/settings/test_s.py::test_s", "passed")]),
+    ])
+
+    assert farm_control.cmd_aggregate(argparse.Namespace()) == 0
+
+    pages = sorted((farm / "results" / "R01" / "按批").glob("*.html"))
+    assert len(pages) == 2, f"两批该有两份单批页，实际 {[p.name for p in pages]}"
+    pa = next(p for p in pages if p.stem.endswith("_task_A"))
+    pb = next(p for p in pages if p.stem.endswith("_task_B"))
+
+    a = pa.read_text(encoding="utf-8")
+    assert "launch" in a and "unit" in a, "T1 的页要含它自己的两个套件"
+    assert "settings" not in a, "T1 的页里不许出现 T2 的套件"
+    assert "R01_2026-10-28_1100" not in a, "T1 的页里不许出现 T2 的轮次目录"
+    assert "task_A" in pa.name and "2026-10-28" in pa.name, f"文件名要带日期和任务号：{pa.name}"
+    assert "abc1234" in a, "单批页要写代码 rev —— 对上哪次跑的另一个依据"
+
+    b = pb.read_text(encoding="utf-8")
+    assert "settings" in b and "launch" not in b
+
+
+def test_batch_page_links_each_suite_report(farm):
+    """单批页要能点进每个套件自己的完整报告（断言和截图在那里面）。"""
+    _put_batch(farm, "R01", "task_A", [
+        ("R01_2026-10-28_1000", "launch", [_case("tests/launch/test_p0_launch.py::test_a", "passed")]),
+    ])
+    farm_control.cmd_aggregate(argparse.Namespace())
+    page = next((farm / "results" / "R01" / "按批").glob("*_task_A.html")).read_text(encoding="utf-8")
+    assert "../R01_2026-10-28_1000/report.html" in page, "单批页要链到该套件自己的 report.html"
+
+
+def test_node_index_lists_one_row_per_dispatch_newest_first(farm):
+    """节点 index 顶部「按投批」表：一次投批一行、新在上、链到单批页。
+
+    任务号**故意**取成字符串序与时间序相反（`task_z9` 早跑、`task_a1` 晚跑）——
+    按字符串倒序排会把老批次顶到第一行（真农场里 `task_toast_probe` 就干过这事）。
+    """
+    _put_batch(farm, "R01", "task_z9", [
+        ("R01_2026-10-28_1000", "launch", [_case("tests/launch/test_p0_launch.py::test_a", "passed")]),
+    ])
+    _put_batch(farm, "R01", "task_a1", [
+        ("R01_2026-10-28_1100", "settings", [_case("tests/settings/test_s.py::test_s", "passed")]),
+    ])
+    farm_control.cmd_aggregate(argparse.Namespace())
+
+    html_text = (farm / "results" / "R01" / "index.html").read_text(encoding="utf-8")
+    table = html_text.split("按投批看")[1].split("按套件看")[0]
+    assert "task_a1" in table and "task_z9" in table, "两批都该在按投批表里"
+    assert table.index("task_a1") < table.index("task_z9"), "新跑的一批该排在上面（按完成时间，不按任务号字符串）"
+    assert "./按批/" in table and "_task_a1.html" in table, "要链到单批页"
+
+
+def test_aggregate_task_flag_writes_only_that_batch(farm):
+    """`aggregate --task <号>`：只补这一批的单批页，不碰根目录总矩阵。"""
+    _put_batch(farm, "R01", "task_A", [
+        ("R01_2026-10-28_1000", "launch", [_case("tests/launch/test_p0_launch.py::test_a", "passed")]),
+    ])
+    assert farm_control.cmd_aggregate(argparse.Namespace(task="task_A")) == 0
+    assert list((farm / "results" / "R01" / "按批").glob("*_task_A.html")), "该写出这一批的单批页"
+    assert not (farm / "aggregate_report.html").exists(), "--task 不该重写总矩阵"
+
+    with pytest.raises(SystemExit) as exc:
+        farm_control.cmd_aggregate(argparse.Namespace(task="task_没有"))
+    assert "task_A" in str(exc.value), "报错要把现有任务号列出来，别让人猜格式"
