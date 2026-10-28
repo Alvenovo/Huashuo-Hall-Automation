@@ -157,7 +157,7 @@ def _called_names(node: ast.AST) -> set[str]:
 
 
 def _function_defs(tree: ast.Module) -> dict[str, list[ast.FunctionDef]]:
-    """模块内所有函数（含嵌套）按名字索引 —— 为了把 `_submit_ms_code` 这种
+    """模块内所有函数（含嵌套）按名字索引 —— 为了把 `_submit_xxx` 这种
     "先定义、再把名字当回调传进去"的写法也解析到函数体。"""
     out: dict[str, list[ast.FunctionDef]] = {}
     for node in ast.walk(tree):
@@ -190,7 +190,7 @@ def test_manual_retry_callbacks_never_send_a_code():
     """**关键保护**：人在环用例传给重试循环的 submit 回调里，不许有"发码"调用。
 
     这是上一条守不住的地方：发码被塞进 `lambda code: ...` 或
-    `def _submit_ms_code(...)` 里时，`ask_code_until_accepted` 自己看不见，
+    `def _submit_xxx(...)` 里时，`ask_code_until_accepted` 自己看不见，
     但每重输一次就会再发一次码。
     """
     tree = _manual_tree()
@@ -218,122 +218,6 @@ def test_manual_retry_callbacks_never_send_a_code():
         if bad:
             offenders.append(f"第 {call.lineno} 行：{sorted(bad)}")
     assert not offenders, f"重试回调里在发码，每次重输都会重发一次：{offenders}"
-
-
-# ---------------------------------------------------------------------------
-# 收码后等结果：**「已登录」和「绑定手机号」要一起等**
-#
-# 2026-09-28 真机实锤：微软账号没绑过手机号时，代码提交成功后弹「绑定手机号」，
-# 而它是登录的**必填一步** —— 不绑就回不到已登录态。原来只等已登录，
-# 于是必然超时，报出来是「微软登录：提交后未进入已登录态」，
-# 把「码是对的、登录已成功、卡在绑定」盖成"登录失败"。
-#
-# 这个坑**在无人值守那条上 2026-09-23 就修过一次**（`test_microsoft_login_sso` 加了
-# `find_bind_dialog` 分支），只是人在环那条漏了 —— 所以这里用结构守卫钉住，
-# 而不是指望下一个人记得。
-# ---------------------------------------------------------------------------
-
-
-def _find_func(tree: ast.Module, name: str) -> ast.FunctionDef:
-    node = next(
-        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name),
-        None,
-    )
-    assert node is not None, f"{name} 不见了"
-    return node
-
-
-@pytest.mark.unit
-def test_manual_microsoft_case_waits_for_the_bind_dialog_too():
-    """**关键保护**：人在环收码那条等结果时必须用 `wait_microsoft_logged_in_or_bind`。
-
-    只等已登录的话，在**没绑过手机号**的账号上必然超时（2026-09-28 真机实锤）。
-    而且回调里还得把绑定流程接上 —— 光"看见弹窗"不处理，一样回不到已登录态。
-    """
-    submit = _find_func(_manual_tree(), "_submit_ms_code")
-    called = _called_names(submit)
-    assert "wait_microsoft_logged_in_or_bind" in called, (
-        "收码后只等已登录 —— 没绑过手机号的账号上这条必然误报「提交后未进入已登录态」"
-    )
-    assert "_bind_phone_if_prompted" in called, "看到绑定弹窗却不接绑定流程，照样回不到已登录态"
-
-
-@pytest.mark.unit
-def test_forgot_password_restore_failure_is_wrapped_and_reports_the_new_password():
-    """**关键保护**：还原程里**任何一步**失败，报错都要带「账户可能停在【新密码】」。
-
-    2026-09-28 真机实付：还原那程发码撞短信限流、裸抛了一句限流提示，
-    「密码可能已经改了」一个字都没说 —— 而第一程是**成功**的，账户真停在了 NEW 上。
-
-    所以盯的是**结构**：finally 里的还原调用必须被 try/except 包住，
-    且 handler 里要调 `_report_restore_failure`（它负责把警告抛出去或补进日志）。
-    """
-    fn = _find_func(_manual_tree(), "test_forgot_password_reset_manual")
-    finals = [n for n in ast.walk(fn) if isinstance(n, ast.Try) and n.finalbody]
-    assert finals, "这个用例没有 finally 还原程了？"
-
-    guarded = [
-        handler
-        for node in finals
-        for inner in ast.walk(node)
-        if isinstance(inner, ast.Try)
-        for handler in inner.handlers
-        if "_report_restore_failure" in _called_names(handler)
-    ]
-    assert guarded, (
-        "还原程没有被 try/except 包住并交给 `_report_restore_failure` —— "
-        "发码/提交任何一步裸抛，都会把「账户可能停在【新密码】」这句警告绕过去"
-    )
-
-
-@pytest.mark.unit
-def test_restore_failure_warning_names_the_new_password():
-    """`_report_restore_failure` 的两条出口：不盖原报错 / 没原报错时自己抛。
-
-    光有结构（上一条）不够 —— 还得确认那句警告里真的写了「新密码」，
-    否则现场读了也不知道账户被改过。
-    """
-    from hall_auto.launch import LaunchError
-
-    from tests.launch.test_p1_login import RESTORE_FAILED_WARNING, _report_restore_failure
-
-    assert "新密码" in RESTORE_FAILED_WARNING
-
-    # ① 本条用例本来就已失败 → 只补警告，不抛（原报错才是要查的东西）
-    _report_restore_failure(LaunchError("原报错"), LaunchError("还原挂了"))
-
-    # ② 没有原报错 → 把警告作为失败抛出去，并带上还原失败的原因
-    with pytest.raises(AssertionError) as exc:
-        _report_restore_failure(None, LaunchError("还原挂了"))
-    assert "新密码" in str(exc.value)
-    assert "还原挂了" in str(exc.value)
-
-
-def test_forgot_password_skips_before_touching_anything_when_opted_out(monkeypatch):
-    """本轮选择不测改密码（`HALL_MANUAL_SKIP_PASSWORD=1`）→ **立即 skip**。
-
-    传 `cfg=None, ready_pid=None`：跳过守卫若真在最前面，这两个参数一个都碰不到，
-    就不会 AttributeError —— 这就证明了 skip 发生在任何发码/改密码/读凭据之前。
-    """
-    from tests.launch.test_p1_login import test_forgot_password_reset_manual
-
-    monkeypatch.setenv("HALL_MANUAL_SKIP_PASSWORD", "1")
-    with pytest.raises(pytest.skip.Exception) as exc:
-        test_forgot_password_reset_manual(cfg=None, ready_pid=None)
-    assert "改密码" in str(exc.value)
-
-
-def test_forgot_password_does_not_skip_when_flag_absent(monkeypatch):
-    """开关没置（或非 "1"）时**不许**被这条守卫跳过 —— 照常往下走。
-
-    仍传 `cfg=None`：既然没在守卫处 skip，就会执行到 `cfg.test_account()`，
-    对 None 取属性抛 AttributeError。用它反证"守卫没触发、流程继续了"。
-    """
-    from tests.launch.test_p1_login import test_forgot_password_reset_manual
-
-    monkeypatch.delenv("HALL_MANUAL_SKIP_PASSWORD", raising=False)
-    with pytest.raises(AttributeError):
-        test_forgot_password_reset_manual(cfg=None, ready_pid=None)
 
 
 # ---------- focus_console：提上去之后还要「待住了」（2026-10-13） ----------

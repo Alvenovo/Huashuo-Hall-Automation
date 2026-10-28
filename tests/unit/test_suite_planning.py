@@ -22,7 +22,7 @@ def test_all_suites_have_unique_names():
 
 @pytest.mark.unit
 def test_manual_suite_never_farm_safe():
-    """人在环用例（会真发短信、真改密码）永远不能进无人值守农场。"""
+    """人在环用例（要真人收短信码）永远不能进无人值守农场。"""
     assert get_suite("login-manual").farm_safe is False
     assert "login-manual" not in {s.name for s in farm_suites()}
 
@@ -31,7 +31,7 @@ def test_manual_suite_never_farm_safe():
 def test_login_suite_marker_excludes_manual_tests():
     """`login` 套件的 marker 必须排除 manual —— 漏了会把农场节点卡死、还真发短信。
 
-    `test_sms_login_manual` / `test_forgot_password_reset_manual` **同时带
+    `test_sms_login_manual`（以及 2026-10-28 一并删掉的微软、改密码那几条）**同时带
     `login` + `manual` 两个 marker**，光写 `"login"` 就会被选进来。
     唯一守卫是 `sys.stdin.isatty()`，而 `farm_agent` 起 pytest 时**只重定向了
     stdout/stderr、没重定向 stdin** → 交互式终端下子进程 isatty 为真 → 不 skip →

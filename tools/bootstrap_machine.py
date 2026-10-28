@@ -1263,10 +1263,12 @@ def step_seven_zip(installer_dir: Path, allow_download: bool, skip: bool = False
 
     为什么 7-Zip 要自动装（而不是"只检测、缺了让人去下"）：
     `hall_auto/security.py::extract_package` 用 `7z x` 解包待检安装包。
-    装的是**钉住的 26.02，不是最新版** —— 它同时是 P1-A 更新夹具的起点，
-    装最新版会让 `test_update_fixture_via_hall` 的起点断言失配、用例转 skip。
+    装的是**钉住的 26.02，不是最新版** —— 它是 P1-A 更新夹具的起点（`reset_fixture.py`
+    靠它把 7-Zip 压回 26.02）。承载那条更新的用例 `test_update_fixture_via_hall`
+    已于 2026-10-28 删除，但**钉版策略照旧**：装了最新版会把这台机器的夹具起点顶掉，
+    以后恢复那条用例时还得再压一次版本。
 
-    拿不到包 / 装不上**都不算铺设失败**：只影响 P2（解包）和 P1-A 的更新用例。
+    拿不到包 / 装不上**都不算铺设失败**：只影响 P2（解包）和夹具复位。
     """
     st = Step("7-Zip")
     if skip:

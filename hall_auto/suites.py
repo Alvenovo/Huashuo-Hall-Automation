@@ -152,8 +152,8 @@ SUITES: dict[str, Suite] = {
     "login": Suite(
         name="login",
         paths=("tests/launch/test_p1_login.py", "tests/launch/test_p1_register.py"),
-        # `and not manual` 不能省：test_sms_login_manual / test_forgot_password_reset_manual
-        # **同时带 login + manual 两个 marker**，光写 "login" 会把它们选进来。
+        # `and not manual` 不能省：人在环那条（test_sms_login_manual）**同时带
+        # login + manual 两个 marker**，光写 "login" 会把它选进来。
         # 唯一守卫是 `sys.stdin.isatty()`，而 farm_agent 起 pytest 时没重定向 stdin
         # （只重定向了 stdout/stderr）→ 子进程 isatty 为真 → 不 skip →
         # 真发短信 + `input()` 永久阻塞 → 那台机器再也取不到下一个任务。
@@ -170,11 +170,11 @@ SUITES: dict[str, Suite] = {
         marker=MARKER_MANUAL,
         parallel="serial",
         needs=(
-            "人在环：需交互式终端 + HALL_TEST_USER/PASSWORD/NEW_PASSWORD；"
-            "会真发短信、真改密码、登录后可能真绑手机号（HALL_BIND_PHONE，缺省回退 HALL_TEST_USER）"
+            "人在环：需交互式终端 + HALL_TEST_USER/PASSWORD；"
+            "会真发短信，登录后可能真绑手机号（HALL_BIND_PHONE，缺省回退 HALL_TEST_USER）"
         ),
         farm_safe=False,  # 永不进无人值守农场
-        # 2026-09-22 真机踩出：不加 `-s` 时这三条**永远 skip**，整套人在环等于不存在。
+        # 2026-09-22 真机踩出：不加 `-s` 时人在环那条**永远 skip**，整套等于不存在。
         # 详见 build_command 里的实测记录。
         interactive=True,
     ),

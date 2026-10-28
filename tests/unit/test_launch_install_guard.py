@@ -21,8 +21,8 @@
    2026-09-28 实测：`test_personal_storage_all_signed` 拿
    `cfg.security.personal_storage_dir`（`C:/Program Files (x86)/ASUS/PersonalStorage`，
    **随产品安装才出现**）直接去镜像，机器上没有就抛 `SecurityToolError` ——
-   而**同套件的另两条**（`test_control_panel_info` / `test_manifest_matches_package`）
-   都规规矩矩 skip。缺目录是环境问题，不是「签名有问题」，红在这里是假红。
+   而**同套件的另两条**（`test_control_panel_info` 等，当时还有已删除的
+   `test_manifest_matches_package`）都规规矩矩 skip。缺目录是环境问题，不是「签名有问题」，红在这里是假红。
 
 ## 为什么只查 fixture / test 函数
 

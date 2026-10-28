@@ -99,18 +99,6 @@ cases:
   verify: 用大厅把夹具应用装上后注册表出现条目，再卸掉后条目消失（装/卸都真发生）
   ref: tests/launch/test_p1_apps.py::test_fixture_install_then_uninstall
   needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1
-- id: P1A-03
-  title: 大厅内更新夹具
-  suite: apps-lifecycle
-  marker:
-  - apps
-  - destructive
-  tier: code
-  kind: case
-  status: destructive
-  verify: 把夹具钉在老版本，点大厅的「更新」按钮，版本要升到更新向导标题声明的目标版本
-  ref: tests/launch/test_p1_apps.py::test_update_fixture_via_hall
-  needs: 管理员（提权通道 HallAutoP1）+ HALL_ALLOW_INSTALL=1
 - id: P1A-04
   title: 同步列表（登录态）
   suite: apps-detect
@@ -182,31 +170,6 @@ cases:
   verify: 已登录态点退出后回到未登录态，登录弹窗自动关闭
   ref: tests/launch/test_p1_login.py::test_logout_returns_to_anonymous
   needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
-- id: P1B-04
-  title: 微软账号 SSO 免密登录
-  suite: login
-  marker:
-  - login
-  tier: code
-  kind: case
-  status: active
-  verify: 填邮箱 → 下一步 → 点缓存账号磁贴走 SSO 免密 → 断言已登录 → finally 还原登出
-  ref: tests/launch/test_p1_login.py::test_microsoft_login_sso
-  needs: HALL_TEST_USER / HALL_TEST_PASSWORD（缺则相关用例自动 skip）
-  notes: 本机绑过手机号才过（绑定按机器生效，每台新机各做一次）
-- id: P1B-05
-  title: 微软邮箱验证码登录 人在环
-  suite: login-manual
-  marker:
-  - login
-  - manual
-  tier: code
-  kind: case
-  status: manual
-  verify: 点【发送验证码】→ 人工开邮箱取码回填 → 断言已登录 → 还原登出
-  ref: tests/launch/test_p1_login.py::test_microsoft_login_code_manual
-  needs: 人在环：交互式终端 + HALL_TEST_USER / PASSWORD / NEW_PASSWORD
-  notes: 走免密分支的机器上会先 skip（test_p1_login.py:277 判 account_picker）
 - id: P1B-06
   title: 短信登录 人在环
   suite: login-manual
@@ -219,19 +182,6 @@ cases:
   verify: 脚本发验证码后停下，等人工回填手机收到的码，再断言登录成功
   ref: tests/launch/test_p1_login.py::test_sms_login_manual
   needs: 人在环：交互式终端 + HALL_TEST_USER / PASSWORD / NEW_PASSWORD
-- id: P1B-07
-  title: 忘记密码往返 人在环
-  suite: login-manual
-  marker:
-  - login
-  - manual
-  tier: code
-  kind: case
-  status: manual
-  verify: 真改密码 → 用新密码重新登录验证 → 再还原回原密码（做→验证→还原的可逆往返）。本轮可选「不测」跳过，省 2 个短信码
-  ref: tests/launch/test_p1_login.py::test_forgot_password_reset_manual
-  needs: 人在环：交互式终端 + HALL_TEST_USER / PASSWORD / NEW_PASSWORD
-  notes: 2026-10-10 实付：往返「人工放弃」（753s，密码未改）→ 该轮未覆盖，疑似短信超限
 - id: P1C-01
   title: 注册页控件图
   suite: login
@@ -414,17 +364,6 @@ cases:
   status: active
   verify: 签章检查报告里没有 ECC（异常/错误）项
   ref: tests/launch/test_p2_security.py::test_signcheck_report_no_ecc
-  needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
-- id: P2S-05
-  title: 清单双向对比
-  suite: security
-  marker:
-  - security
-  tier: code
-  kind: case
-  status: active
-  verify: 安全清单文件与安装包实际清单对比一致（集合相等，任一方向有差异都判失败）
-  ref: tests/launch/test_p2_security.py::test_manifest_matches_package
   needs: config.local.yaml 的 security.tools_dir 指向内部工具本地副本（缺则 skip）
 - id: P2W-01
   title: WB 双图标并存

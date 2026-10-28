@@ -479,10 +479,11 @@ def test_dismiss_bind_dialog_is_a_single_non_blocking_probe():
 def test_logout_dismisses_leftover_bind_dialog_before_touching_the_user_area():
     """**关键保护**：`logout()` 必须**先**收掉残留的「绑定手机号」模态弹窗，再点用户区。
 
-    为什么这条值得单锁：无人值守的 SSO 那条（`test_microsoft_login_sso`）登进去
+    为什么这条值得单锁（成因是 2026-10-28 已删除的无人值守 SSO 那条）：登录进去
     就可能弹这个窗，它挡着用户区 → 直接点会抛「退出登录：点不开用户菜单」，
-    **与"登出功能坏了"同形**，排查方向全错。人在环那两条会自己处理弹窗，
-    所以这个假红只在无人值守那条上出现 —— 最难归因的一类。
+    **与"登出功能坏了"同形**，排查方向全错。人在环那条会自己处理弹窗，但它在
+    「人工放弃回填」时是直接 skip 出去的，窗可能还挂着 —— 这个假红最难归因，
+    所以顺序约束留在 `logout()` 里，别因为对应用例删了就把它一并清掉。
     """
     order: list[str] = []
     with (
