@@ -539,3 +539,62 @@ def test_looks_like_main_window_false_when_structure_incomplete():
 def test_looks_like_main_window_false_when_uia_is_broken():
     settings = load_config().launch
     assert launch._looks_like_main_window(_BoomNode(), settings) is False
+
+
+@pytest.mark.unit
+def test_wait_until_ready_rebind_propagates_to_callers_wrapper(monkeypatch):
+    """换绑必须写回**调用方手里那个 wrapper**，不能只改 wait_until_ready 的局部变量。
+
+    2026-10-27 节点实付：夹具 `ready_main` 拿到的是过渡窗（启动卡片），
+    wait_until_ready 内部虽然换绑到了真主窗，但只改了它自己的局部变量，
+    夹具 yield 的还是旧句柄 → 搜索用例在卡片窗里找 SearchBarInput 必然找不到。
+    这条守卫钉死「换绑后调用方的 wrapper 句柄真的变了」。
+    """
+    settings = load_config().launch
+    cfg = load_config()
+
+    real = _main_like_node(*settings.required_auto_ids)
+    real.handle = 777
+    real.element_info = _RebindInfo(7, 777)
+
+    calls = {"n": 0}
+
+    def _overlays(*_a, **_k):
+        calls["n"] += 1
+        return [] if calls["n"] > 1 else [Overlay(name="华硕大厅", node=real)]
+
+    monkeypatch.setattr(launch, "_overlay_windows", _overlays)
+    monkeypatch.setattr(launch, "dismiss_whitelist_popups", lambda *_a, **_k: None)
+    monkeypatch.setattr(launch, "_structure", lambda *_a, **_k: (set(settings.required_auto_ids), True))
+    monkeypatch.setattr(launch, "click_first_run_agree", lambda *_a, **_k: False)
+    monkeypatch.setattr(launch, "home_content_present", lambda *_a, **_k: True)
+    monkeypatch.setattr(launch, "_save_screenshot", lambda *_a, **_k: None)
+
+    holder = _RebindHolder(111, 7)
+    launch.wait_until_ready(cfg, holder)
+
+    assert holder.handle == 777, "换绑没写回调用方的 wrapper，用例还会拿过渡窗找控件"
+    assert holder._element_info is real.element_info
+
+
+class _RebindInfo:
+    def __init__(self, pid: int, handle: int) -> None:
+        self.process_id = pid
+        self.handle = handle
+
+
+class _RebindHolder:
+    """ mimics 一个 pywinauto wrapper：只暴露 wait_until_ready 会碰到的几个属性。"""
+
+    def __init__(self, handle: int, pid: int) -> None:
+        self._element_info = _RebindInfo(pid, handle)
+        self.handle = handle
+        self._as_parameter_ = handle
+        self._cache = {}
+
+    @property
+    def element_info(self):
+        return self._element_info
+
+    def window_text(self):
+        return "华硕大厅"

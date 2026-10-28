@@ -660,6 +660,19 @@ def _looks_like_main_window(node, settings: LaunchSettings) -> bool:
     return all(aid in aids for aid in settings.required_auto_ids)
 
 
+def _rebind_in_place(dst, src) -> None:
+    """把 `dst` 这个 wrapper **原地**改指向 `src` 那个窗口。
+
+    pywinauto 的 `element_info` 是只读属性，真身是 `_element_info`；`handle`、
+    `_as_parameter_`、`_cache` 都从它派生 —— 换窗时四个一起换，漏一个就会出现
+    「名字是新窗、句柄是旧窗」的半新半旧 wrapper。
+    """
+    dst._element_info = src.element_info
+    dst.handle = src.handle
+    dst._as_parameter_ = src.handle
+    dst._cache = {}
+
+
 def wait_until_ready(cfg: Config, main) -> LaunchResult:
     settings = cfg.launch
     # handle / pid 是不变量，但 UIA 每次取要 ~1s（实测），就绪循环每轮都跑覆盖层
@@ -682,11 +695,14 @@ def wait_until_ready(cfg: Config, main) -> LaunchResult:
         if unknown:
             real = next((o for o in unknown if _looks_like_main_window(o.node, settings)), None)
             if real is not None:
+                # 换绑必须**写回调用方手里那个 wrapper**：夹具 yield 的就是它。
+                # 只改本函数局部变量的话，调用方拿到的还是过渡窗 —— 2026-10-27 节点
+                # 实付：搜索用例在「启动卡片窗口」里找 SearchBarInput，必然找不到。
+                _rebind_in_place(main, real.node)
                 try:
-                    main_handle = real.node.handle
+                    main_handle = main.handle
                 except Exception:
                     main_handle = None
-                main = real.node
                 print("[env] 主窗口句柄冻在过渡窗上，已换绑到真主窗口继续等就绪")
                 time.sleep(0.5)
                 continue
