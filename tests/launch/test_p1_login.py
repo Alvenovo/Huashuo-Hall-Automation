@@ -283,7 +283,10 @@ def test_microsoft_login_code_manual(cfg, ready_pid):
         submit_microsoft_email(ms_win, email)
         state = wait_microsoft_state(ready_pid, ms_win, email)
         if state == "account_picker":
-            pytest.skip("这台机器走的是账号选择器免密分支（无验证码可收），请跑 test_microsoft_login_sso")
+            # 老文案让人改跑 test_microsoft_login_sso，但那条因「接回调后大厅自退」
+            # 已停放 skip 待产品确认 —— 指过去等于指一条同样跑不了的用例。
+            pytest.skip("这台机器走的是账号选择器免密分支（无验证码可收）；"
+                        "微软登录的替代条已停放待产品确认，本机微软登录全黄是预期现状")
         if state != "email_otp":
             pytest.skip(f"微软没走邮箱验证码分支（当前 {state}）")
         microsoft_send_code(ms_win)
