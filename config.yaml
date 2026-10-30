@@ -24,7 +24,7 @@ download:
 # 环境变量 HALL_PACKAGE_SHARE 可临时覆盖（单机切换用，不必改配置）。
 #
 # ⚠️ **写机器名，不要写 IP**：本机 IP 由 DHCP 分配，会变。
-# 2026-09-18 实测就踩过：配的是 `//192.168.0.4/...`，机器重启后 IP 变成 192.168.0.8，
+# 2026-09-18 实测就踩过：配的是 `//<共享盘IP>/...`，机器重启后 IP 变成 <共享盘IP>，
 # 于是所有节点报「找不到网络名（系统错误 67）」—— 看起来像共享没建，实际是 IP 过期。
 # 机器名（NetBIOS/LLMNR 解析）在同一局域网里是稳的。
 package_share:
@@ -33,7 +33,7 @@ package_share:
   # 例（多共享盘做冗余，按顺序试，不可达的会被跳过）：
   # dirs:
   #   - "//LAPTOP-VS5F7HF4/hall-packages"       # 机器名访问（推荐）
-  #   - "//192.168.0.8/hall-packages"           # 备用：本机当时 IP，会随 DHCP 变化
+  #   - "//<共享盘IP>/hall-packages"           # 备用：本机当时 IP，会随 DHCP 变化
 
 display_name_contains: "华硕大厅"
 search_keyword: "qq"
